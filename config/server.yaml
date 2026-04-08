@@ -1,0 +1,91 @@
+# ─────────────────────────────────────────────
+# server.yaml — Server(Jetson Orin Nano 8GB) 전용 설정
+# ─────────────────────────────────────────────
+#
+# default.yaml의 공통값 위에 덮어쓰기(override)된다.
+# Server에서만 필요한 STT, TTS, Cloud LLM 설정을 정의한다.
+
+# ─────────────── STT (음성→텍스트) ───────────────
+stt:
+  model_size: "large-v3-turbo"    # large-v3 | large-v3-turbo | medium
+                                  # large-v3: 최고 정확도, ~3GB VRAM
+                                  # large-v3-turbo: 속도/정확도 균형
+                                  # medium: 메모리 부족 시 (~1.5GB)
+  compute_type: "float16"         # float16 | int8_float16 | int8
+                                  # float16: Tensor Core 활용, ~3GB
+                                  # int8_float16: 메모리 절약, ~1.5GB
+  language: "ko"                  # 기본 언어 (자동 감지도 가능)
+  beam_size: 5                    # 빔 서치 크기 (클수록 정확, 느림)
+  model_dir: "models/"            # 모델 다운로드/캐시 경로
+
+# ─────────────── TTS (텍스트→음성) ───────────────
+tts:
+  voice_style: "F1"              # 음성 스타일
+                                 # 남성: M1~M5, 여성: F1~F5
+  speed: 1.0                     # 재생 속도 (1.0 = 기본)
+  inference_steps: 5             # 추론 스텝 수
+                                 # 2: 최고속 (RTF ~0.012)
+                                 # 128: 최고 품질
+                                 # 권장: 2~8 (음성비서는 속도 우선)
+
+# ─────────────── Cloud LLM ───────────────
+# API 키는 환경변수로 설정 (YAML에 적지 않음):
+#   export ANTHROPIC_API_KEY="sk-ant-..."
+#   export OPENAI_API_KEY="sk-..."
+cloud:
+  provider: "claude"             # claude | gpt
+  models:                        # 모델 티어링 (orchestrator가 자동 선택)
+    haiku: "claude-haiku-4-5-20251001"    # 단순 질문, TTFT ~200-500ms
+    sonnet: "claude-sonnet-4-6"           # 복잡한 질문, TTFT ~500-1500ms
+  gpt_model: "gpt-5.4"           # GPT 대체 모델 (provider: gpt일 때)
+  max_tokens: 500                # 최대 응답 길이 (음성이므로 짧게)
+  summarize_threshold_tokens: 4000  # 히스토리 요약 트리거 추정 토큰 수
+                                    # 글자 수 // 2 로 추정 (tokenizer 없이)
+                                    # 4000 ≈ 30턴 (1턴 평균 ~130 토큰)
+  timeout_s: 15                  # API 타임아웃 (초)
+
+# ─────────────── 로컬 인텐트 ───────────────
+# Cloud LLM 호출 없이 Server에서 직접 응답하는 패턴.
+# STT 결과 텍스트가 패턴에 매칭되면 Cloud를 건너뛰고 즉시 TTS 변환.
+local_intents:
+  - name: "대화 종료"
+    patterns:
+      ko: ["(바이|빠이)(\s*(바이|빠이))?(\s*벤슨)?", "[굿굳]\s*(바이|빠이)(\s*벤슨)?"]
+      en: ["\bbye(\s*bye)?(\s*benson)?", "\bgoodbye(\s*benson)?"]
+    responses:
+      ko: "안녕히 가세요."
+      en: "Goodbye."
+    clear_session: true          # 대화 종료 시 대화 히스토리 초기화
+
+# ─────────────── 타임아웃 메시지 ───────────────
+# Edge에서 무발화 타임아웃이 발생하면 Server가 이 메시지를 TTS로 변환하여 보냄.
+# Cloud LLM을 호출하지 않고 로컬에서 즉시 처리한다 (지연 최소화).
+timeout_messages:
+  prompt:                        # 무발화 15초 → 의사확인 메시지
+    ko: "계속 대화하시겠어요?"
+    en: "Are you still there?"
+  end:                           # 의사확인 후 5초 무응답 → 세션 종료 안내
+    ko: "대화를 종료합니다."
+    en: "Ending conversation."
+
+# ─────────────── gRPC (default.yaml 확장) ───────────────
+grpc:
+  max_workers: 4                 # gRPC 서버 워커 스레드 수
+
+# ─────────────── 모니터링 ───────────────
+monitoring:
+  prometheus_port: 9090          # Prometheus 메트릭 서버 포트
+                                 # 시스템 통계는 백그라운드 폴링 없이 온디맨드로 읽음:
+                                 #   - HealthCheck 호출 시 (Edge가 주기적으로 호출)
+                                 #   - ProcessVoice 시작/완료 시 (요청별 로깅)
+
+# ─────────────── 전력 관리 ───────────────
+power:
+  mode: "MAXN"                    # 15W | 25W | MAXN (Super 모드)
+                                  # MAXN: GPU 1007MHz, 최대 성능
+                                  # 15W: GPU 625MHz, 발열 제한 환경
+
+# ─────────────── 로깅 (default.yaml 확장) ───────────────
+logging:
+  level: "DEBUG"                  # 개발 중에는 "DEBUG"로 변경
+  file: "logs/server.log"         # 로그 파일 경로

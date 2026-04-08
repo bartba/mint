@@ -1,0 +1,28 @@
+# STT - faster-whisper (CTranslate2 기반, PyTorch 불필요)
+faster-whisper>=1.0
+ctranslate2>=4.0
+
+# TTS - Supertonic (ONNX Runtime 기반, 한국어+영어 다국어 통합)
+supertonic
+onnxruntime                   # GPU 가속 필요 시: onnxruntime-gpu
+
+# gRPC
+grpcio>=1.60
+grpcio-tools>=1.60
+protobuf>=4.25
+
+# Cloud LLM - LangChain 기반
+langchain>=0.3
+langchain-anthropic>=0.3
+langchain-openai>=0.3
+langchain-ollama>=0.3          # 로컬 폴백 LLM (gemma3:1b)
+
+# Config & Utilities
+pyyaml>=6.0
+
+# Monitoring
+prometheus-client>=0.20
+
+# Jetson system monitoring
+# jetson-stats는 호스트에 sudo로 설치 필요 (venv 미지원):
+#   sudo pip3 install -U jetson-stats

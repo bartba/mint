@@ -1,0 +1,101 @@
+// Protocol Buffers 버전 3 사용 (현재 표준)
+syntax = "proto3";
+
+// 패키지명: 네임스페이스 역할. 다른 proto 파일과 이름 충돌 방지
+package voiceassistant;
+
+// ─────────────────────────────────────────────
+// Service 정의: Edge가 호출할 수 있는 함수(RPC) 목록
+// ─────────────────────────────────────────────
+
+service VoiceService {
+
+  // Edge → Server: 오디오 스트림을 보내면, STT 결과 + TTS 오디오 스트림을 받음
+  //
+  // "stream" 키워드의 의미:
+  //   stream AudioChunk  = Edge가 오디오 조각을 여러 번 연속 전송
+  //   stream VoiceResponse = Server가 결과를 여러 번 연속 반환
+  //   양쪽 모두 stream = "양방향 스트리밍" (bidirectional streaming)
+  rpc ProcessVoice (stream AudioChunk) returns (stream VoiceResponse);
+
+  // Edge → Server: 무발화 타임아웃 발생 시 로컬 TTS 메시지 요청
+  //   Cloud LLM 호출 없이 server.yaml의 timeout_messages를 TTS 변환하여 반환
+  //   type=PROMPT: 15초 무발화 → "계속 대화하시겠어요?"
+  //   type=END:    5초 추가 무발화 → "대화를 종료합니다."
+  rpc TimeoutPrompt (TimeoutRequest) returns (stream VoiceResponse);
+
+  // Edge → Server: 대화 세션 종료 요청
+  //   종료 TTS 오디오 스트림 반환 + Server 대화 히스토리 초기화
+  //   로컬 인텐트(바이바이 등) 매칭 시 ProcessVoice 내에서 처리되므로,
+  //   이 RPC는 Edge가 명시적으로 세션을 끊을 때(앱 종료, 강제 종료 등) 사용
+  rpc EndSession (EndSessionRequest) returns (stream VoiceResponse);
+
+  // Edge → Server: 서버 상태 확인 (단순 요청-응답, 스트리밍 아님)
+  rpc HealthCheck (Empty) returns (ServerStatus);
+}
+
+// ─────────────────────────────────────────────
+// Message 정의: 주고받는 데이터의 구조
+// ─────────────────────────────────────────────
+
+// Edge → Server: 오디오 데이터 조각 하나
+message AudioChunk {
+  bytes data = 1;           // PCM 오디오 바이너리 데이터
+  int32 sample_rate = 2;    // 샘플레이트 (16000Hz)
+  string encoding = 3;      // 인코딩 형식 ("pcm_s16le" 등)
+  int64 timestamp_ms = 4;   // 타임스탬프 (밀리초)
+}
+
+// Server → Edge: 응답 (STT 결과 또는 TTS 오디오)
+message VoiceResponse {
+  // oneof: 이 중 하나만 담겨있음 (STT 결과 아니면 TTS 오디오)
+  oneof response {
+    STTResult stt_result = 1;   // STT 완료 시 텍스트 결과
+    AudioChunk tts_audio = 2;   // TTS 변환된 오디오 조각
+  }
+}
+
+// Server → Edge: 음성인식(STT) 결과
+message STTResult {
+  string text = 1;          // 인식된 텍스트 ("안녕하세요" 등)
+  float confidence = 2;     // 신뢰도 (0.0 ~ 1.0)
+  bool is_final = 3;        // 최종 결과 여부
+  string language = 4;      // 감지된 언어 ("ko" 또는 "en")
+}
+
+// Server → Edge: 서버 상태 정보
+message ServerStatus {
+  bool stt_ready = 1;       // STT 모델 로드 완료 여부
+  bool tts_ready = 2;       // TTS 모델 로드 완료 여부
+  float gpu_usage = 3;      // GPU 사용률 (0.0 ~ 1.0)
+  float memory_usage = 4;   // 메모리 사용률 (0.0 ~ 1.0)
+  float temperature = 5;    // GPU 온도 (섭씨)
+}
+
+// 빈 메시지: HealthCheck 요청 시 보낼 데이터가 없을 때 사용
+message Empty {}
+
+// ─────────────────────────────────────────────
+// TimeoutPrompt 관련 메시지
+// ─────────────────────────────────────────────
+
+// 타임아웃 종류: 의사확인(PROMPT) vs 세션 종료 안내(END)
+enum TimeoutType {
+  TIMEOUT_PROMPT = 0;    // 15초 무발화 → "계속 대화하시겠어요?"
+  TIMEOUT_END = 1;       // 5초 추가 무발화 → "대화를 종료합니다."
+}
+
+// Edge → Server: 타임아웃 TTS 요청
+message TimeoutRequest {
+  TimeoutType type = 1;  // 타임아웃 종류
+  string language = 2;   // 응답 언어 ("ko" 또는 "en")
+}
+
+// ─────────────────────────────────────────────
+// EndSession 관련 메시지
+// ─────────────────────────────────────────────
+
+// Edge → Server: 세션 종료 요청
+message EndSessionRequest {
+  string language = 1;   // 종료 메시지 언어 ("ko" 또는 "en")
+}

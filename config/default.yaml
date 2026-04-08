@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────
+# default.yaml — Edge/Server 공유 기본값
+# ─────────────────────────────────────────────
+#
+# 이 파일의 값은 device별 설정(server.yaml, edge.yaml)에 의해
+# 덮어쓰일 수 있다. 여기에는 양쪽이 공통으로 사용하는 값만 둔다.
+#
+# YAML 문법 참고:
+#   key: value        → 딕셔너리 (Python의 dict)
+#   - item            → 리스트 (Python의 list)
+#   들여쓰기 2칸      → 중첩 구조 (dict 안의 dict)
+
+# gRPC 통신 설정 (Edge ↔ Server)
+grpc:
+  port: 50051                    # 포트 번호 (양쪽 동일해야 통신 가능)
+  max_message_size: 10485760     # 10MB (= 10 * 1024 * 1024 바이트)
+
+# 오디오 공통 설정
+audio:
+  sample_rate: 16000             # 16kHz (음성인식 표준)
+  encoding: "pcm_s16le"          # PCM 16bit 리틀엔디안
+  chunk_size: 4096               # 스트리밍 전송 단위 (바이트)
+
+# 로깅 기본값
+logging:
+  level: "DEBUG"                  # DEBUG | INFO | WARNING | ERROR
+
+# 모니터링
+monitoring:
+  prometheus_port: 9090
