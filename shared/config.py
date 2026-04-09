@@ -7,9 +7,11 @@ get_config()를 통해 앱 어디서든 동일한 설정 객체에 접근할 수
 사용 예:
     from shared.config import get_config
 
-    config = get_config("server")          # config/default.yaml + config/server.yaml 병합
-    print(config["stt"]["model_size"])      # "large-v3"
-    print(config["cloud"]["api_key"])       # 환경변수 API_KEY 값
+    config = get_config("server")                           # config/default.yaml + config/server.yaml 병합
+    config = get_config("server", device="jetson_orin_nx")  # 디바이스 프로파일까지 병합
+    print(config["stt"]["model_size"])                      # "large-v3"
+    print(config["cloud"]["api_key"])                       # 환경변수 API_KEY 값
+    print(config["local_llm_model"])                        # "gemma4:e4b" (디바이스 프로파일 값)
 """
 
 import os
@@ -18,6 +20,8 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+
+from shared.device_profiles import get_device_profile
 
 
 # ─────────────────────────────────────────────
@@ -135,61 +139,73 @@ def inject_env_vars(config: dict) -> dict:
 # 싱글턴: get_config()
 # ─────────────────────────────────────────────
 
-# 모듈 레벨 변수 — 한 번 로드된 설정을 캐시
-_config_cache: Optional[dict] = None
+# 모듈 레벨 변수 — (role, device) 쌍을 키로 캐시
+# 예: {("server", "jetson_orin_nx"): {...}, ("edge", None): {...}}
+_config_cache: dict[tuple, dict] = {}
 
 
-def get_config(role: str = "server") -> dict:
+def get_config(role: str = "server", device: Optional[str] = None) -> dict:
     """
     설정을 로드하고 캐시된 결과를 반환한다.
 
     Args:
-        role: "server" 또는 "edge". 해당 YAML 파일을 추가 로드한다.
+        role:   "server" 또는 "edge". 해당 YAML 파일을 추가 로드한다.
+        device: 디바이스 ID (예: "jetson_orin_nx"). 지정하면 디바이스
+                프로파일을 config에 딥 머지한다. None이면 프로파일 미적용.
 
     Returns:
         병합된 설정 딕셔너리.
 
     로드 순서:
-        1. config/default.yaml  (공통 기본값)
-        2. config/{role}.yaml   (디바이스별 설정, default를 덮어씀)
-        3. 환경변수             (API 키 등 민감한 값)
+        1. config/default.yaml      (공통 기본값)
+        2. config/{role}.yaml       (역할별 설정, default를 덮어씀)
+        3. 디바이스 프로파일         (device 지정 시, role 설정을 덮어씀)
+        4. 환경변수                  (API 키 등 민감한 값)
 
-    싱글턴 패턴:
-        처음 호출 시 파일을 읽고, 이후 호출에서는 캐시를 반환한다.
-        앱 전체에서 설정 객체가 하나만 존재하게 보장한다.
+    캐시 키:
+        (role, device) 튜플로 관리한다.
+        같은 role이라도 device가 다르면 별도 캐시 항목을 가진다.
 
     사용 예:
         config = get_config("server")
+        config = get_config("server", device="jetson_orin_nx")
         config["stt"]["model_size"]      # → "large-v3"
-        config["grpc"]["port"]           # → 50051
+        config["local_llm_model"]        # → "gemma4:e4b"  (디바이스 프로파일 값)
     """
-    global _config_cache
+    cache_key = (role, device)
 
     # 이미 로드했으면 캐시 반환 (싱글턴)
-    if _config_cache is not None:
-        return _config_cache
+    if cache_key in _config_cache:
+        return _config_cache[cache_key]
 
     # 1단계: 공통 기본값 로드
     default_config = load_yaml(CONFIG_DIR / "default.yaml")
 
-    # 2단계: 디바이스별 설정 로드 및 병합
+    # 2단계: 역할별 설정 로드 및 병합
     role_config = load_yaml(CONFIG_DIR / f"{role}.yaml")
     merged = deep_merge(default_config, role_config)
 
-    # 3단계: 환경변수 주입
+    # 3단계: 디바이스 프로파일 병합 (device가 지정된 경우)
+    # 프로파일의 값이 YAML 설정보다 우선한다.
+    # 예: 프로파일의 local_llm_model이 server.yaml 기본값을 덮어씀
+    if device is not None:
+        profile = get_device_profile(device)
+        merged = deep_merge(merged, profile)
+
+    # 4단계: 환경변수 주입
     merged = inject_env_vars(merged)
 
     # 캐시에 저장
-    _config_cache = merged
+    _config_cache[cache_key] = merged
 
-    return _config_cache
+    return _config_cache[cache_key]
 
 
 def reset_config() -> None:
     """
-    캐시를 초기화한다. 테스트 시 설정을 다시 로드해야 할 때 사용.
+    캐시를 전체 초기화한다. 테스트 시 설정을 다시 로드해야 할 때 사용.
 
     프로덕션에서는 호출할 필요 없다 — 앱 실행 중 설정이 바뀌지 않으므로.
     """
     global _config_cache
-    _config_cache = None
+    _config_cache = {}

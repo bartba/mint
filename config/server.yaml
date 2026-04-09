@@ -1,9 +1,12 @@
 # ─────────────────────────────────────────────
-# server.yaml — Server(Jetson Orin Nano 8GB) 전용 설정
+# server.yaml — Server(Jetson Orin Nano/NX) 전용 설정
 # ─────────────────────────────────────────────
 #
 # default.yaml의 공통값 위에 덮어쓰기(override)된다.
-# Server에서만 필요한 STT, TTS, Cloud LLM 설정을 정의한다.
+# Server에서만 필요한 STT, Cloud LLM, 인텐트 설정을 정의한다.
+#
+# TTS는 Edge로 이관됨 → config/edge.yaml 참조
+# 타임아웃 메시지는 Edge 로컬 처리 → config/edge.yaml 참조
 
 # ─────────────── STT (음성→텍스트) ───────────────
 stt:
@@ -18,66 +21,57 @@ stt:
   beam_size: 5                    # 빔 서치 크기 (클수록 정확, 느림)
   model_dir: "models/"            # 모델 다운로드/캐시 경로
 
-# ─────────────── TTS (텍스트→음성) ───────────────
-tts:
-  voice_style: "F1"              # 음성 스타일
-                                 # 남성: M1~M5, 여성: F1~F5
-  speed: 1.0                     # 재생 속도 (1.0 = 기본)
-  inference_steps: 5             # 추론 스텝 수
-                                 # 2: 최고속 (RTF ~0.012)
-                                 # 128: 최고 품질
-                                 # 권장: 2~8 (음성비서는 속도 우선)
+# ─────────────── 로컬 인텐트 LLM ───────────────
+# STT 텍스트를 받아 인텐트를 판단하는 로컬 LLM 설정.
+# Cloud LLM 호출 전에 먼저 로컬 LLM으로 인텐트를 분석한다.
+#
+# model 기본값은 디바이스 프로파일에서 오버라이드된다:
+#   jetson_orin_nano (8GB)  → shared/device_profiles.py: "gemma4:e2b"
+#   jetson_orin_nx   (16GB) → shared/device_profiles.py: "gemma4:e4b"
+local_intent_llm:
+  model: "gemma4:e2b"             # 기본값 — 디바이스 프로파일로 오버라이드됨
+  base_url: "http://localhost:11434"  # Ollama 서버 주소
+  timeout_s: 5                    # 인텐트 분석 타임아웃 (초)
+                                  # 5초 초과 시 인텐트 없음으로 처리 → Cloud LLM 호출
+
+# ─────────────── 로컬 인텐트 정의 ───────────────
+# 인텐트 이름과 응답 텍스트 정의.
+# 로컬 LLM이 인텐트를 감지하면 Cloud LLM 없이 여기서 즉시 응답.
+local_intents:
+  - name: "end_session"
+    responses:
+      ko: "대화를 종료합니다. 언제든 다시 불러 주세요."
+      en: "End of conversation. Call me anytime."
+    save_and_clear_session: true  # 종료 시 대화 히스토리 저장 후 초기화
 
 # ─────────────── Cloud LLM ───────────────
 # API 키는 환경변수로 설정 (YAML에 적지 않음):
 #   export ANTHROPIC_API_KEY="sk-ant-..."
 #   export OPENAI_API_KEY="sk-..."
 cloud:
-  provider: "claude"             # claude | gpt
-  models:                        # 모델 티어링 (orchestrator가 자동 선택)
-    haiku: "claude-haiku-4-5-20251001"    # 단순 질문, TTFT ~200-500ms
-    sonnet: "claude-sonnet-4-6"           # 복잡한 질문, TTFT ~500-1500ms
-  gpt_model: "gpt-5.4"           # GPT 대체 모델 (provider: gpt일 때)
-  max_tokens: 500                # 최대 응답 길이 (음성이므로 짧게)
-  summarize_threshold_tokens: 4000  # 히스토리 요약 트리거 추정 토큰 수
-                                    # 글자 수 // 2 로 추정 (tokenizer 없이)
-                                    # 4000 ≈ 30턴 (1턴 평균 ~130 토큰)
-  timeout_s: 15                  # API 타임아웃 (초)
+  provider: "claude"              # claude | gpt
+  claude_model: "claude-haiku-4-5-20251001"  # Claude 모델 (provider: claude일 때)
+  gpt_model: "gpt-5-mini"           # GPT 모델 (provider: gpt일 때)
+  max_tokens: 500                 # 최대 응답 길이 (음성이므로 짧게)
+  summarize_threshold_tokens: 4000   # 히스토리 요약 트리거 추정 토큰 수
+                                     # 글자 수 // 2 로 추정 (tokenizer 없이)
+                                     # 4000 ≈ 30턴 (1턴 평균 ~130 토큰)
+  timeout_s: 10                   # API 타임아웃 (초)
 
-# ─────────────── 로컬 인텐트 ───────────────
-# Cloud LLM 호출 없이 Server에서 직접 응답하는 패턴.
-# STT 결과 텍스트가 패턴에 매칭되면 Cloud를 건너뛰고 즉시 TTS 변환.
-local_intents:
-  - name: "대화 종료"
-    patterns:
-      ko: ["(바이|빠이)(\s*(바이|빠이))?(\s*벤슨)?", "[굿굳]\s*(바이|빠이)(\s*벤슨)?"]
-      en: ["\bbye(\s*bye)?(\s*benson)?", "\bgoodbye(\s*benson)?"]
-    responses:
-      ko: "안녕히 가세요."
-      en: "Goodbye."
-    clear_session: true          # 대화 종료 시 대화 히스토리 초기화
-
-# ─────────────── 타임아웃 메시지 ───────────────
-# Edge에서 무발화 타임아웃이 발생하면 Server가 이 메시지를 TTS로 변환하여 보냄.
-# Cloud LLM을 호출하지 않고 로컬에서 즉시 처리한다 (지연 최소화).
-timeout_messages:
-  prompt:                        # 무발화 15초 → 의사확인 메시지
-    ko: "계속 대화하시겠어요?"
-    en: "Are you still there?"
-  end:                           # 의사확인 후 5초 무응답 → 세션 종료 안내
-    ko: "대화를 종료합니다."
-    en: "Ending conversation."
+# ─────────────── 대화 이력 저장 ───────────────
+storage:
+  db_path: "data/sessions.db"    # SQLite DB 파일 경로
 
 # ─────────────── gRPC (default.yaml 확장) ───────────────
 grpc:
-  max_workers: 4                 # gRPC 서버 워커 스레드 수
+  max_workers: 4                  # gRPC 서버 워커 스레드 수
 
 # ─────────────── 모니터링 ───────────────
 monitoring:
-  prometheus_port: 9090          # Prometheus 메트릭 서버 포트
-                                 # 시스템 통계는 백그라운드 폴링 없이 온디맨드로 읽음:
-                                 #   - HealthCheck 호출 시 (Edge가 주기적으로 호출)
-                                 #   - ProcessVoice 시작/완료 시 (요청별 로깅)
+  prometheus_port: 9090           # Prometheus 메트릭 서버 포트
+                                  # 시스템 통계는 백그라운드 폴링 없이 온디맨드로 읽음:
+                                  #   - HealthCheck 호출 시 (Edge가 주기적으로 호출)
+                                  #   - ProcessVoice 시작/완료 시 (요청별 로깅)
 
 # ─────────────── 전력 관리 ───────────────
 power:

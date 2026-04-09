@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────
+# edge.yaml — Edge 디바이스 전용 설정
+# ─────────────────────────────────────────────
+#
+# default.yaml의 공통값 위에 덮어쓰기(override)된다.
+# Edge에서만 필요한 오디오, TTS, VAD, 웨이크워드, 타임아웃 설정을 정의한다.
+#
+# TTS는 Server에서 이관됨. Edge가 직접 Supertonic TTS를 실행한다.
+# 타임아웃 메시지는 Server 호출 없이 Edge에서 직접 TTS 재생한다.
+
+# ─────────────── TTS (텍스트→음성) ───────────────
+# Edge가 Server로부터 텍스트 문장을 수신하여 직접 TTS 합성 후 재생.
+tts:
+  voice_style: "F1"               # 음성 스타일 (남성: M1~M5, 여성: F1~F5)
+  inference_steps: 5              # 추론 스텝 수
+                                  # 2: 최고속, 128: 최고품질
+                                  # 디바이스 프로파일에서 오버라이드됨:
+                                  #   jetson_nano:     tts_inference_steps: 4
+                                  #   raspberry_pi_4b: tts_inference_steps: 3
+
+# ─────────────── 오디오 ───────────────
+audio:
+  sample_rate: 16000              # 마이크 샘플링 레이트 (Hz)
+  encoding: "pcm_s16le"           # PCM 16bit little-endian
+  chunk_size: 4096                # 한 번에 읽는 오디오 청크 크기 (bytes)
+
+# ─────────────── 웨이크워드 ───────────────
+wakeword:
+  model: "hey_mack"               # openWakeWord 모델명
+  threshold: 0.35                 # 감지 임계값 (낮을수록 민감, 오탐 증가)
+
+# ─────────────── VAD (음성 활동 감지) ───────────────
+# Silero VAD로 발화 시작/종료를 감지한다.
+vad:
+  threshold: 0.5                  # 발화 감지 임계값 (0~1)
+                                  # 디바이스 프로파일에서 오버라이드 가능
+  min_silence_ms: 500             # 이 시간 이상 무음이면 발화 종료로 판단 (ms)
+
+# ─────────────── 타임아웃 ───────────────
+# Edge가 직접 타이머를 관리한다. Server 호출 없음.
+timeout:
+  listen_s: 15                    # LISTENING 상태에서 무발화 허용 시간 (초)
+                                  # 초과 시 → prompt 메시지 TTS 재생
+  confirm_s: 5                    # prompt 메시지 후 추가 무발화 허용 시간 (초)
+                                  # 초과 시 → end 메시지 TTS 재생 → 세션 종료
+
+# ─────────────── 타임아웃 안내 메시지 ───────────────
+# Server 호출 없이 Edge에서 직접 TTS로 재생하는 로컬 메시지.
+# 언어는 마지막 STT 결과의 language 값을 따른다. 없으면 "ko" 기본값.
+timeout_messages:
+  prompt:                         # listen_s 무발화 시 의사확인
+    ko: "계속 대화하시겠어요?"
+    en: "Would you like to continue?"
+  end:                            # confirm_s 추가 무발화 시 종료 안내
+    ko: "대화를 종료합니다. 언제든 다시 불러 주세요."
+    en: "End of conversation. Call me anytime."
+
+# ─────────────── gRPC (default.yaml 확장) ───────────────
+grpc:
+  reconnect_interval_s: 5         # Server 연결 끊김 시 재연결 간격 (초)
+  health_check_interval_s: 30     # Server 헬스체크 주기 (초)
+
+# ─────────────── 로깅 (default.yaml 확장) ───────────────
+logging:
+  level: "INFO"
+  file: "logs/edge.log"

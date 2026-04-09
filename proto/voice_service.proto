@@ -23,12 +23,6 @@ service VoiceService {
   //   3. TextResponse (인텐트 결과 또는 세션 종료 신호)
   rpc ProcessVoice (stream AudioChunk) returns (stream VoiceResponse);
 
-  // Edge → Server: 무발화 타임아웃 발생 시 로컬 텍스트 메시지 요청
-  //   Cloud LLM 호출 없이 server.yaml의 timeout_messages를 텍스트로 반환
-  //   type=PROMPT: 15초 무발화 → "계속 대화하시겠어요?"
-  //   type=END:    5초 추가 무발화 → "대화를 종료합니다."
-  rpc TimeoutPrompt (TimeoutRequest) returns (stream VoiceResponse);
-
   // Edge → Server: 대화 세션 종료 요청
   //   종료 안내 텍스트 반환 + Server 대화 히스토리 초기화
   //   로컬 인텐트 매칭 시 ProcessVoice 내에서 처리되므로,
@@ -59,7 +53,6 @@ message TextResponse {
                             //   "sentence"     — LLM 응답 문장 (TTS 재생 대상)
                             //   "end_session"  — 세션 종료 신호
                             //   "intent"       — 로컬 인텐트 결과
-                            //   "timeout"      — 타임아웃 메시지
   bool is_final = 4;        // true면 이 응답이 마지막 문장임을 나타냄
 }
 
@@ -91,22 +84,6 @@ message ServerStatus {
 
 // 빈 메시지: HealthCheck 요청 시 보낼 데이터가 없을 때 사용
 message Empty {}
-
-// ─────────────────────────────────────────────
-// TimeoutPrompt 관련 메시지
-// ─────────────────────────────────────────────
-
-// 타임아웃 종류: 의사확인(PROMPT) vs 세션 종료 안내(END)
-enum TimeoutType {
-  TIMEOUT_PROMPT = 0;    // 15초 무발화 → "계속 대화하시겠어요?"
-  TIMEOUT_END = 1;       // 5초 추가 무발화 → "대화를 종료합니다."
-}
-
-// Edge → Server: 타임아웃 텍스트 요청
-message TimeoutRequest {
-  TimeoutType type = 1;  // 타임아웃 종류
-  string language = 2;   // 응답 언어 ("ko" 또는 "en")
-}
 
 // ─────────────────────────────────────────────
 // EndSession 관련 메시지
