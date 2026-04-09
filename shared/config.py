@@ -9,7 +9,7 @@ get_config()를 통해 앱 어디서든 동일한 설정 객체에 접근할 수
 
     config = get_config("server")          # config/default.yaml + config/server.yaml 병합
     print(config["stt"]["model_size"])      # "large-v3"
-    print(config["cloud"]["api_key"])       # 환경변수 ANTHROPIC_API_KEY 값
+    print(config["cloud"]["api_key"])       # 환경변수 API_KEY 값
 """
 
 import os
