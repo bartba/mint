@@ -8,14 +8,18 @@
 3. 디바이스는 실행 시 CLI 인자로 선택 (예: `python main.py --edge --device raspberry_pi_4b`)
 4. TTS를 Server → Edge로 이관. Server는 텍스트 응답, Edge가 TTS 실행
 5. 로컬 인텐트 분석을 정규식 → 로컬 LLM(Gemma4:e2B or Gemma4:e4B, Ollama)으로 교체
-6. Cloud LLM 스트리밍 응답을 문장 단위 텍스트로 Edge에 전송
+6. **이중 채널 출력**: Cloud LLM이 단일 API 호출에서 두 섹션(`[SPOKEN]` + `[DISPLAY]`)을 순차 생성
+   - `[SPOKEN]` 섹션: 구어체 3~5문장 요약 → Edge로 전송 → TTS 재생
+   - `[DISPLAY]` 섹션: 완전한 상세 응답 (마크다운 포함) → FastAPI WebSocket → 브라우저 대시보드
+   - TTS 첫 문장 지연 증가 없음 (SPOKEN이 먼저 생성됨)
 7. Edge는 수신 텍스트를 TTS 변환 후 재생 (파이프라인, 끊김 없음)
 8. 대화 세션 종료 인텐트: Server가 `end_session` 신호(TextResponse.type) + 안내 텍스트 전송 → Edge가 TTS 재생
 9. **타임아웃 메시지는 Edge 로컬 처리**: `TimeoutPrompt` RPC 제거. Edge가 로컬 텍스트를 직접 TTS 재생하여 지연 최소화 및 Server 단절 시에도 정상 동작
+10. **FastAPI 대시보드**: gRPC(50051)와 별도 포트(8080)로 운영. WebSocket으로 DISPLAY 섹션 실시간 스트리밍 + 마크다운 렌더링. proto 변경 없음.
 
 완료된 문서 수정:
-- [x] `CLAUDE.md` (루트)
-- [x] `server/CLAUDE.md`
+- [x] `CLAUDE.md` (루트) — 이중 채널 출력 흐름 반영
+- [x] `server/CLAUDE.md` — 이중 섹션 파이프라인, dual_stream_parser, dashboard 언급
 - [x] `edge/CLAUDE.md`
 - [x] `proto/voice_service.proto` — VoiceResponse에 TextResponse 추가, TTS 오디오 제거
 
@@ -92,13 +96,22 @@ def list_devices(role: str) -> list[str]: ...
     timeout_s: 5
   ```
 - `local_intents` 섹션 유지 (인텐트 이름/응답 텍스트 정의용)
-- `cloud.models` 섹션 단순화:
+- `cloud` 섹션 단순화 + **max_tokens 상향** (이중 섹션 출력 대응):
   ```yaml
   cloud:
     provider: "claude"
-    model: "claude-haiku-4-5-20251001"  # 단일 모델 (티어링 제거)
-    max_tokens: 500
-    ...
+    claude_model: "claude-haiku-4-5-20251001"
+    gpt_model: "gpt-5-mini"
+    max_tokens: 1600   # SPOKEN(~200) + DISPLAY(~800) 동시 생성 → 기존 800에서 상향
+    summarize_threshold_tokens: 8000
+    timeout_s: 10
+  ```
+- **`dashboard` 섹션 신규 추가** (이중 채널 출력을 위한 FastAPI 서버):
+  ```yaml
+  dashboard:
+    enabled: true
+    host: "0.0.0.0"   # 모든 인터페이스 (LAN 접근 허용)
+    port: 8080        # 브라우저 접속: http://<server_ip>:8080
   ```
 
 ### 1-4. `config/edge.yaml` (신규)
@@ -145,6 +158,9 @@ timeout_messages:
 - `enum TimeoutType { TIMEOUT_PROMPT = 0; TIMEOUT_END = 1; }`
 - `TextResponse.type` 주석에서 `"timeout"` 항목 제거 (Edge 전용이므로 proto 정의에서 불필요)
 
+**대시보드 관련 proto 변경 없음**: 대시보드는 별도 HTTP/WebSocket 포트로 운영되므로
+Edge↔Server gRPC 프로토콜은 그대로 유지한다.
+
 **제거 사유**:
 - `TimeoutPrompt` RPC는 정적 문자열 룩업만 수행 → 네트워크 왕복 낭비
 - Edge가 타임아웃 타이머를 관리하므로 메시지도 Edge에 두는 것이 책임 분리 측면에서 자연스러움
@@ -174,9 +190,19 @@ python -m grpc_tools.protoc \
 - 인텐트 있음 → 인텐트 이름 반환 → 핸들러 실행
 
 시스템 프롬프트 설계:
-- JSON으로 응답하도록 지시 (`{"intent": "end_session"}` 또는 `{"intent": null}`)
-- 현재 지원 인텐트: `end_session`
+- JSON으로 응답하도록 지시
+- 지원 인텐트: `end_session`, `pause_listening` (+ `duration_s` 선택 필드), `list_sessions`
+- 미감지 시: `{"intent": "none"}` → Cloud LLM 호출
 - 프롬프트는 한국어/영어 모두 처리하도록 이중 예시 포함
+
+응답 포맷 예시:
+```json
+{"intent": "end_session"}
+{"intent": "pause_listening", "duration_s": 300}
+{"intent": "pause_listening"}              // duration 미지정 → default 5분
+{"intent": "list_sessions"}
+{"intent": "none"}
+```
 
 ```python
 class IntentAnalyzer:
@@ -186,10 +212,10 @@ class IntentAnalyzer:
         # jetson_orin_nx   → "gemma4:e4b"
         ...
 
-    async def analyze(self, text: str, language: str) -> str | None:
+    async def analyze(self, text: str, language: str) -> dict | None:
         # 로컬 LLM 호출 (ChatOllama.ainvoke)
-        # JSON 응답 파싱 → intent 이름 추출
-        # 반환: "end_session" | None
+        # JSON 응답 파싱 → intent dict 추출
+        # 반환: {"intent": "end_session"} | {"intent": "pause_listening", "duration_s": 300} | None
 ```
 
 **주의**: 모델명은 하드코딩하지 않고 config에서 주입받는다. 디바이스에 따라 `gemma4:e2b` 또는 `gemma4:e4b`가 선택된다.
@@ -206,16 +232,28 @@ class IntentResult:
     signal: str                  # TextResponse.type 값 ("end_session" 등)
     save_and_clear_session: bool # True면 히스토리 저장 후 초기화
 
-async def handle_end_session(language: str) -> IntentResult:
+async def handle_end_session(language: str, **kwargs) -> IntentResult:
     return IntentResult(
         text="대화를 종료합니다. 언제든 다시 불러 주세요" if language == "ko"
              else "End of conversation. Call me anytime",
         signal="end_session",
-        save_and_clear_session=True,  # 히스토리 저장 후 초기화
+        save_and_clear_session=True,
     )
+
+async def handle_pause_listening(language: str, duration_s: int = 300, **kwargs) -> IntentResult:
+    duration_min = duration_s // 60
+    return IntentResult(
+        text=f"네, {duration_min}분간 대기할게요. 부르시면 다시 들을게요." if language == "ko"
+             else f"Okay, I'll pause for {duration_min} minutes. Call me when you're ready.",
+        signal="pause_listening",
+        save_and_clear_session=False,
+    )
+
+# list_sessions 핸들러는 orchestrator에서 DB 조회 후 직접 처리 (Phase 5-4 참조)
 
 INTENT_HANDLERS = {
     "end_session": handle_end_session,
+    "pause_listening": handle_pause_listening,
 }
 ```
 
@@ -224,7 +262,7 @@ INTENT_HANDLERS = {
 저장 모듈은 Phase 5에서 구현한다.
 
 ### 2-3. `server/cloud/sentence_splitter.py` (신규)
-LLM 스트리밍 토큰 → 문장 단위 분리.
+LLM 스트리밍 토큰 → 문장 단위 분리. SPOKEN 채널 전용.
 기존 `server/tts/supertonic_service.py`의 `_split_sentences()` 로직을 독립 모듈로 이관.
 
 ```python
@@ -240,137 +278,515 @@ class SentenceSplitter:
         # 토큰 누적 → 문장 완성 시 yield
 ```
 
-### 2-4. `server/orchestrator.py` 수정
+**적용 범위**: SPOKEN 섹션에서만 사용. DISPLAY 섹션은 마크다운/표/코드가 포함되어 있어 문장 단위 분리가 무의미하므로, 토큰 단위로 WebSocket에 그대로 브로드캐스트한다.
+
+### 2-4. `server/cloud/dual_stream_parser.py` (신규) ★ 이중 채널 핵심
+
+Cloud LLM 스트리밍 토큰에서 `[SPOKEN]...[/SPOKEN]` / `[DISPLAY]...[/DISPLAY]` 섹션을 분리하는 파서.
+
+```python
+from typing import AsyncIterator, Literal
+
+Channel = Literal["tts", "display"]
+
+class DualStreamParser:
+    """
+    스트리밍 토큰에서 두 섹션을 분리하여 (channel, token) 튜플로 yield.
+
+    상태:
+        OUTSIDE    — 섹션 밖 (섹션 태그 탐색 중)
+        IN_SPOKEN  — [SPOKEN] ... [/SPOKEN] 사이
+        IN_DISPLAY — [DISPLAY] ... [/DISPLAY] 사이
+
+    주의:
+        - 태그 경계가 토큰에 걸칠 수 있음 (예: "[SPO" + "KEN]")
+          → 내부 버퍼에 누적하고 완성된 태그를 찾으면 상태 전이
+        - 태그 자체는 yield하지 않음
+        - 섹션 밖의 토큰(공백, 줄바꿈 등)은 버림
+    """
+
+    def __init__(self):
+        self.state: Literal["OUTSIDE", "IN_SPOKEN", "IN_DISPLAY"] = "OUTSIDE"
+        self.buffer: str = ""  # 태그 경계 대응용
+
+    async def parse(
+        self, token_stream: AsyncIterator[str]
+    ) -> AsyncIterator[tuple[Channel, str]]:
+        """
+        토큰 스트림을 받아 (channel, content) 튜플을 yield.
+
+        channel:
+            "tts"     — SPOKEN 섹션 내용 → SentenceSplitter → TTS → Edge
+            "display" — DISPLAY 섹션 내용 → WebSocket → 브라우저
+        """
+        async for token in token_stream:
+            self.buffer += token
+            # 태그 탐색 루프: 버퍼에서 최대한 많은 태그/컨텐츠 추출
+            while True:
+                consumed = self._try_consume()
+                if consumed is None:
+                    break  # 더 많은 토큰이 필요
+                channel, content = consumed
+                if content:  # 빈 청크는 skip
+                    yield channel, content
+
+    def _try_consume(self) -> tuple[Channel, str] | None:
+        """
+        현재 상태에 따라 버퍼에서 컨텐츠를 추출.
+
+        OUTSIDE:
+            [SPOKEN] 또는 [DISPLAY] 태그를 찾음 → 상태 전이 → 버퍼에서 태그 제거
+            미발견 시 None (더 많은 토큰 필요)
+
+        IN_SPOKEN:
+            [/SPOKEN] 태그 전까지의 모든 토큰을 ("tts", content)로 반환
+            [/SPOKEN] 발견 시 상태를 OUTSIDE로 전이
+
+        IN_DISPLAY:
+            [/DISPLAY] 태그 전까지의 모든 토큰을 ("display", content)로 반환
+            [/DISPLAY] 발견 시 상태를 OUTSIDE로 전이
+        """
+        ...
+```
+
+**테스트 케이스** (`tests/test_dual_stream_parser.py`):
+- 정상: `[SPOKEN]안녕[/SPOKEN][DISPLAY]안녕하세요[/DISPLAY]` → `[("tts", "안녕"), ("display", "안녕하세요")]`
+- 토큰 경계 분리: `["[SPOKEN]안", "녕[/SP", "OKEN]"]` → `[("tts", "안녕")]`
+- 빈 섹션: `[SPOKEN][/SPOKEN][DISPLAY]x[/DISPLAY]` → `[("display", "x")]`
+- 순서 보장: SPOKEN이 먼저 완료되어야 DISPLAY 시작됨
+
+### 2-5. `server/cloud/prompt_templates.py` 수정 — 이중 섹션 프롬프트
+
+시스템 프롬프트를 **이중 섹션 출력**을 유도하도록 재작성.
+
+**새 프롬프트 구조** (한국어):
+```
+당신은 한국어 AI 음성 비서입니다.
+
+반드시 아래 두 섹션 형식으로 응답하세요. 다른 텍스트(설명, 머리말)는 포함하지 마세요.
+
+[SPOKEN]
+여기에는 음성 재생용 요약을 작성합니다.
+- 구어체 (일상 대화체).
+- 한 문장은 30자 이내.
+- 전체 3~5문장.
+- 마크다운, 이모지, 특수 기호, 괄호 금지.
+- 숫자는 한글로 풀어 씁니다. (예: "3개" → "세 개")
+- 영어 단어는 한국어 발음으로 표기합니다. (예: "AI" → "에이아이")
+[/SPOKEN]
+
+[DISPLAY]
+여기에는 브라우저 화면 표시용 상세 응답을 작성합니다.
+- 길이 제한 없음.
+- 마크다운(제목, 목록, 표, 코드 블럭) 자유롭게 사용 가능.
+- 영어 약어, 고유명사, 숫자 그대로 표기 가능.
+- 이모지 사용 가능.
+[/DISPLAY]
+```
+
+**영어 프롬프트**도 동일 구조로 작성:
+- SPOKEN: `Each sentence under 15 words`, `3-5 sentences total`, `No markdown/emoji`, `Spell out numbers when natural`
+- DISPLAY: `No length limit`, `Markdown allowed`, `Technical formatting allowed`
+
+**제거할 규칙** (기존 단일 섹션 프롬프트에서):
+- 첫 문장 호응 강제 ("네,", "글쎄요," 등 — 선택 사항으로 완화)
+- 전체 응답 길이 제한 (DISPLAY는 자유롭게)
+
+**유지할 규칙** (SPOKEN에만 적용):
+- 30자 / 15 words 이내 문장
+- 3~5 문장 총량
+- 마크다운/이모지 금지
+- 숫자 한글 표기
+
+**주석/의도 설명**:
+- 이중 섹션의 이유: GUI 풍부한 응답 + TTS 구어체 요약 동시 제공
+- 토큰 오버헤드 ~30% (SPOKEN + DISPLAY) 감수하는 이유: 단일 API 호출 + 지연 없음
+- SPOKEN이 먼저 생성되는 이유: LLM 순차 생성 특성상 TTS 재생이 즉시 시작되도록 배치
+
+### 2-6. `server/cloud/llm_client.py` 수정 — 이중 채널 스트림
+
+`get_response_stream()`을 **이중 채널 출력**으로 변경.
+
+**변경 포인트**:
+1. 반환 타입: `AsyncIterator[str]` → `AsyncIterator[tuple[Channel, str]]`
+2. 내부에서 `DualStreamParser`를 통해 토큰을 `(channel, content)` 튜플로 분리
+3. 히스토리 저장: DISPLAY 섹션 내용만 `AIMessage`로 저장 (맥락 품질 우선)
+4. try/finally에서 누적된 DISPLAY 부분 응답 저장 (정상 완료 시)
+
+```python
+async def get_response_stream(
+    self, user_text: str, language: str
+) -> AsyncIterator[tuple[Channel, str]]:
+    messages = self._build_messages(user_text, language)
+    self.conversation_history.append(HumanMessage(content=user_text))
+
+    display_buffer = ""  # 히스토리 저장용 (DISPLAY 섹션만)
+    parser = DualStreamParser()
+
+    async def raw_token_stream():
+        async for chunk in self.llm.astream(messages):
+            token = chunk.content or ""
+            yield token
+
+    try:
+        async for channel, content in parser.parse(raw_token_stream()):
+            if channel == "display":
+                display_buffer += content
+            yield channel, content
+    finally:
+        # 정상 완료 시 여기로 진입
+        if display_buffer:
+            self.conversation_history.append(AIMessage(content=display_buffer))
+```
+
+**주의**:
+- SPOKEN 섹션은 히스토리에 저장하지 않는다 (요약본이므로 다음 턴 맥락에 부적합)
+- DISPLAY 섹션만 저장하여 Cloud LLM이 이전 대화 맥락을 풍부하게 유지
+
+### 2-7. `server/orchestrator.py` 수정
 - `SupertonicTTSService` 의존성 제거
 - `select_model_tier()` 제거 — 모델 티어링 기능 삭제, Cloud LLM은 단일 모델만 사용
 - `IntentAnalyzer` 추가 (기존 정규식 `check_local_intent` 교체)
-- `startup()`: TTS 로드 제거, IntentAnalyzer 초기화 추가
+- `startup()`: TTS 로드 제거, IntentAnalyzer 초기화, **대시보드 브로드캐스터 참조 보관**
 - `check_local_intent()` 제거 → `analyze_intent()` (비동기, LLM 기반)
 - `get_tts_service()` 제거
 
-### 2-5. `server/grpc_server.py` 수정
-핵심 변경: TTS 오디오 스트림 → 텍스트 스트림 전송. 모델 티어링 호출 제거.
+### 2-8. `server/grpc_server.py` 수정 — 이중 채널 라우팅
 
-ProcessVoice 변경:
+핵심 변경: Cloud LLM 응답을 **채널별로 분기 처리**.
+- `("tts", sentence)` → Edge에 `TextResponse` gRPC 전송 (기존 문장 단위 스트리밍)
+- `("display", token)` → FastAPI WebSocket 브로드캐스트 (대시보드 GUI)
+
 ```python
-# 기존: select_model_tier() 호출 후 TTS 오디오 청크 yield
-# 변경: 단일 모델로 Cloud LLM 호출 후 텍스트 문장 yield
-yield pb2.VoiceResponse(
-    text_response=pb2.TextResponse(
-        text=sentence,
-        language=language,
-        type="sentence",
-        is_final=False,
-    )
-)
+# ProcessVoice 내 Cloud LLM 호출 부분
+from server.cloud.sentence_splitter import SentenceSplitter
+from server.dashboard.app import broadcast_display_token, broadcast_session_event
+
+async def _run_cloud_llm(self, user_text, language, context):
+    # STT 결과도 대시보드에 전송 (사용자 말풍선용)
+    await broadcast_session_event({
+        "type": "user_message",
+        "text": user_text,
+        "language": language,
+    })
+
+    # SPOKEN 채널 문장 단위 분리용 SentenceSplitter
+    splitter = SentenceSplitter()
+    spoken_buffer = ""
+
+    async for channel, content in self.orchestrator.cloud_client.get_response_stream(
+        user_text, language
+    ):
+        if channel == "tts":
+            # SPOKEN: 문장 단위로 분리 → Edge로 텍스트 전송
+            spoken_buffer += content
+            sentences = splitter.split(spoken_buffer)
+            spoken_buffer = sentences.pop()  # 마지막은 미완성 버퍼
+            for sentence in sentences:
+                yield pb2.VoiceResponse(
+                    text_response=pb2.TextResponse(
+                        text=sentence,
+                        language=language,
+                        type="sentence",
+                        is_final=False,
+                    )
+                )
+        elif channel == "display":
+            # DISPLAY: 토큰 단위로 WebSocket에 브로드캐스트 (GUI 타이핑 효과)
+            await broadcast_display_token(content)
+
+    # 남은 SPOKEN 버퍼 flush
+    if spoken_buffer.strip():
+        yield pb2.VoiceResponse(
+            text_response=pb2.TextResponse(
+                text=spoken_buffer.strip(),
+                language=language,
+                type="sentence",
+                is_final=True,
+            )
+        )
+
+    # DISPLAY 완료 신호
+    await broadcast_session_event({"type": "assistant_done"})
 ```
 
+기타 변경:
 - `select_model_tier()` 호출 제거
 - `_tts_to_stream()` 헬퍼 제거 → `_text_response()` 헬퍼로 교체
 - `TimeoutPrompt` 핸들러 **완전 제거** (RPC 자체가 proto에서 삭제됨)
 - `EndSession`: TTS 오디오 대신 텍스트 전송. 추가로 `SessionRepository.save()` + `CloudLLMClient.clear_history()` 호출 (Phase 4 완료 후 연결)
 
-### 2-6. `server/main.py` 수정
-CLI 인자 추가:
+### 2-9. `server/main.py` 수정 — gRPC + FastAPI 병행 실행
+
+CLI 인자 추가 및 FastAPI/Uvicorn을 asyncio에 병행 실행.
+
 ```python
 parser.add_argument("--server", action="store_true")
 parser.add_argument("--device", type=str, default="jetson_orin_nano",
                     choices=["jetson_orin_nano", "jetson_orin_nx"])
-```
-`get_config("server", device=args.device)` 호출.
 
-### 2-7. `shared/models.py` 수정
+async def serve():
+    config = get_config("server", device=args.device)
+    orchestrator = ServerOrchestrator(config)
+    await orchestrator.startup()
+
+    # gRPC 서버
+    grpc_server = grpc.aio.server(...)
+    pb2_grpc.add_VoiceServiceServicer_to_server(
+        VoiceServiceHandler(orchestrator), grpc_server
+    )
+    grpc_server.add_insecure_port(f"[::]:{config['grpc']['port']}")
+    await grpc_server.start()
+
+    # FastAPI 대시보드 서버 (config.dashboard.enabled일 때만)
+    dashboard_task = None
+    if config.get("dashboard", {}).get("enabled", False):
+        from server.dashboard.app import create_app
+        import uvicorn
+        app = create_app(orchestrator)
+        uvicorn_config = uvicorn.Config(
+            app,
+            host=config["dashboard"]["host"],
+            port=config["dashboard"]["port"],
+            log_level="info",
+        )
+        dashboard_server = uvicorn.Server(uvicorn_config)
+        dashboard_task = asyncio.create_task(dashboard_server.serve())
+
+    # SIGTERM/SIGINT 대기
+    try:
+        await grpc_server.wait_for_termination()
+    finally:
+        if dashboard_task:
+            dashboard_task.cancel()
+        await orchestrator.shutdown()
+```
+
+### 2-10. `shared/models.py` 수정
 - `TextResponseData` 데이터클래스 추가 (to_proto / from_proto)
 - `TTSRequestData` 제거 (Server에서 TTS 미사용)
 - `VoiceResponse` 변환 메서드에 `text_response` 분기 추가
 
-### 2-8. `server/cloud/prompt_templates.py` 수정
-시스템 프롬프트를 새 설계 원칙에 맞게 조정.
+### 2-11. [삭제됨] Barge-in 처리
 
-**제거할 규칙**:
-- "응답의 첫 문장은 '네,', '글쎄요,', '좋은 질문이에요,' 같은 짧은 호응으로 시작합니다." (한국어)
-- "Start your response with a short acknowledgment like 'Sure,', 'Well,', ..." (영어)
-
-**유지/강화할 규칙**:
-- 구어체 발화 (격식체보다 자연스러운 일상 대화체)
-- 한 문장 30자 이내 (ko) / 15 words 이내 (en)
-- 전체 3~5문장
-- 문장 종결 부호(`. ? !`) 및 쉼표(`,`) 만 허용 → `sentence_splitter`의 분리 기준으로 필요
-- 마크다운(`**`, `##`, `` ` ``), 이모지, 특수 기호(`※`, `→`, `★`, `•` 등), 괄호 주석 금지
-- 숫자는 한글로 풀어 씀 (ko: "3개" → "세 개")
-
-**추가 고려**:
-- "문장 부호 금지"는 문자 그대로가 아니라 "TTS 발음 불가능한 특수 문자"로 해석.
-  일반 마침표/쉼표/물음표/느낌표는 `sentence_splitter`가 문장 경계 감지에 사용하므로 유지 필수.
-- 기존 주석(규칙별 의도 설명)도 "첫 문장 단축" 관련 부분은 제거하고 "구어체 유지" 이유로 교체.
-
-### 2-9. Barge-in 처리 (Edge 끼어들기 대응)
-
-Edge가 TTS 재생 중 사용자 발화를 감지하면 `ProcessVoice` gRPC 스트림을 취소한다.
-Server는 이 취소를 barge-in 신호로 해석하여 응답 생성을 즉시 중단해야 한다.
-
-**설계 원칙**: 새 RPC나 proto 메시지 추가 없이 기존 gRPC 취소 메커니즘만 활용 → 단순성 유지.
-
-**수정 대상 파일 2개**:
-
-1. **`server/cloud/llm_client.py` — `CloudLLMClient.get_response_stream()`**
-   - `try/finally` 블록으로 감싸서 취소(`GeneratorExit` / `CancelledError`) 발생 시 정리 로직 보장.
-   - 누적된 부분 응답(`full_response`)을 `AIMessage`로 `conversation_history`에 저장.
-   - Cloud astream에 대한 별도 cancel 호출 불필요 — Python async generator GC가 자동으로 정리.
-
-   ```python
-   async def get_response_stream(self, user_text: str, language: str):
-       full_response = ""
-       self.conversation_history.append(HumanMessage(content=user_text))
-       try:
-           async for chunk in self.llm.astream(messages):
-               token = chunk.content or ""
-               full_response += token
-               yield token
-       finally:
-           # 정상 완료 / barge-in 취소 모두 여기로 진입
-           # 부분 응답도 히스토리에 저장하여 다음 턴에 맥락 유지
-           if full_response:
-               self.conversation_history.append(AIMessage(content=full_response))
-   ```
-
-2. **`server/grpc_server.py` — `ProcessVoice()` 핸들러**
-   - `async for` 루프 밖에서 `CancelledError`를 잡아 정상 종료 처리.
-   - STT/인텐트 분석 단계는 barge-in 이전에 이미 완료되므로 별도 정리 자원 없음.
-   - 취소 로그만 남기고 다음 RPC 호출을 대기.
-
-   ```python
-   async def ProcessVoice(self, request_iterator, context):
-       try:
-           async for response in self._process(request_iterator, context):
-               yield response
-       except asyncio.CancelledError:
-           logger.info("ProcessVoice cancelled by client (barge-in)")
-           raise  # gRPC에 취소 전파
-   ```
-
-**검증 포인트**:
-- barge-in 발생 후 `conversation_history`에 부분 응답이 `AIMessage`로 남아 있는지 확인
-- 다음 `ProcessVoice` 호출에서 이전 부분 응답이 맥락으로 전달되는지 확인
-- Edge가 취소한 후 Server가 추가 청크를 전송하지 않는지 확인 (stale response 방지)
-
-**설계 의도 요약**:
-- gRPC 취소 = barge-in 신호 (별도 시그널 불필요)
-- 부분 응답 보존으로 자연스러운 대화 흐름 유지 ("아까 말하던 중 끊겼구나"를 LLM이 인지)
-- 단일 진입점(`try/finally`)으로 복잡도 최소화
+> Barge-in 기능은 UX 검토 결과 제거됨 (2026-04-10).
+> 응답이 짧아(SPOKEN 3~5문장) 실효 가치 대비 구현·튜닝 비용이 크고,
+> SPEAKING 중 VAD 오감지 리스크가 있어 삭제 결정.
+> SPEAKING 상태는 TTS 재생 완료 → LISTENING 복귀로 단순화.
 
 ---
 
-## Phase 3: Edge 코드 수정
+## Phase 3: 대시보드 구현 (FastAPI WebSocket + 브라우저 UI)
+
+> `server/dashboard/` 디렉토리를 신규 생성하여 실시간 모니터링 대시보드 구현.
+> gRPC와 독립된 HTTP/WebSocket 서버로 운영.
+
+### 3-1. `server/dashboard/__init__.py` (신규)
+빈 파일 또는 주요 export.
+
+### 3-2. `server/dashboard/app.py` (신규)
+FastAPI 애플리케이션 + WebSocket 브로드캐스터.
+
+```python
+"""
+FastAPI 대시보드 — 이중 채널 출력의 DISPLAY 채널 실시간 표시.
+
+아키텍처:
+    grpc_server.py (DISPLAY 토큰 수신)
+        → broadcast_display_token(token)
+            → WebSocket clients에게 전송
+                → 브라우저 index.html이 실시간 렌더링
+
+WebSocket 메시지 형식 (JSON):
+    {"type": "user_message", "text": "...", "language": "ko"}    — STT 결과
+    {"type": "display_token", "content": "..."}                    — DISPLAY 토큰 조각
+    {"type": "assistant_done"}                                     — 응답 완료
+    {"type": "interrupted"}                                        — 응답 중단
+    {"type": "session_end"}                                        — 세션 종료
+"""
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+import asyncio
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+# 연결된 WebSocket 클라이언트 전역 집합
+_clients: set[WebSocket] = set()
+_clients_lock = asyncio.Lock()
+
+async def broadcast_display_token(token: str) -> None:
+    """DISPLAY 섹션 토큰 조각을 모든 WebSocket 클라이언트에 전송."""
+    await _broadcast({"type": "display_token", "content": token})
+
+async def broadcast_session_event(event: dict) -> None:
+    """세션 이벤트 (user_message, assistant_done, interrupted 등) 브로드캐스트."""
+    await _broadcast(event)
+
+async def _broadcast(message: dict) -> None:
+    payload = json.dumps(message, ensure_ascii=False)
+    async with _clients_lock:
+        dead = set()
+        for ws in _clients:
+            try:
+                await ws.send_text(payload)
+            except Exception as e:
+                logger.warning(f"WebSocket send failed: {e}")
+                dead.add(ws)
+        _clients.difference_update(dead)
+
+def create_app(orchestrator) -> FastAPI:
+    app = FastAPI(title="Mint Voice Assistant Dashboard")
+
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    @app.get("/")
+    async def index():
+        return FileResponse(str(static_dir / "index.html"))
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok", "clients": len(_clients)}
+
+    @app.websocket("/ws")
+    async def websocket_endpoint(ws: WebSocket):
+        await ws.accept()
+        async with _clients_lock:
+            _clients.add(ws)
+        logger.info(f"Dashboard client connected. Total: {len(_clients)}")
+        try:
+            while True:
+                # 클라이언트로부터 ping 등 수신 대기 (실제로는 서버→클라 방향만 사용)
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            async with _clients_lock:
+                _clients.discard(ws)
+            logger.info(f"Dashboard client disconnected. Total: {len(_clients)}")
+
+    return app
+```
+
+**설계 포인트**:
+- WebSocket 클라이언트 집합은 모듈 전역으로 관리 → `grpc_server.py`에서 `broadcast_*` 함수를 import하여 호출
+- `_clients_lock`으로 동시 브로드캐스트/연결 관리 보호
+- 연결 끊긴 클라이언트 자동 제거 (예외 처리)
+
+### 3-3. `server/dashboard/static/index.html` (신규)
+브라우저 실시간 채팅 UI.
+
+**핵심 기능**:
+- WebSocket(`ws://<host>:8080/ws`) 연결
+- 사용자 말풍선 (STT 결과): `{"type": "user_message"}` 수신 시 렌더링
+- 어시스턴트 말풍선 (DISPLAY 섹션): `{"type": "display_token"}` 수신 시 타이핑 효과로 append → 완료 시 마크다운 렌더링
+- `{"type": "interrupted"}` 수신 시 말풍선에 "중단됨" 표시
+- 상단 상태 바: 연결 상태, 현재 세션 언어, 클라이언트 수
+- 자동 스크롤 (하단 고정)
+
+**의존성** (CDN):
+- [marked.js](https://cdn.jsdelivr.net/npm/marked/marked.min.js) — 마크다운 렌더링
+- [highlight.js](https://cdn.jsdelivr.net/npm/highlightjs@11/highlight.min.js) — 코드 블럭 하이라이트
+
+**구조**:
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Mint Voice Assistant Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>Mint Dashboard</h1>
+        <span id="status">⚪ Connecting...</span>
+    </header>
+    <main id="chat"></main>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
+```
+
+### 3-4. `server/dashboard/static/app.js` (신규)
+WebSocket 클라이언트 로직. 메시지 타입별 핸들러.
+
+```javascript
+const ws = new WebSocket(`ws://${location.host}/ws`);
+const chat = document.getElementById('chat');
+const status = document.getElementById('status');
+
+let currentAssistantBubble = null;
+let currentAssistantBuffer = "";
+
+ws.onopen = () => { status.textContent = "🟢 Connected"; };
+ws.onclose = () => { status.textContent = "🔴 Disconnected"; };
+
+ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    switch (msg.type) {
+        case "user_message":
+            appendUserBubble(msg.text, msg.language);
+            startAssistantBubble();
+            break;
+        case "display_token":
+            appendTokenToAssistant(msg.content);
+            break;
+        case "assistant_done":
+            finalizeAssistantBubble();
+            break;
+        case "interrupted":
+            markAssistantInterrupted();
+            break;
+    }
+};
+
+function startAssistantBubble() {
+    currentAssistantBuffer = "";
+    currentAssistantBubble = document.createElement('div');
+    currentAssistantBubble.className = 'bubble assistant';
+    chat.appendChild(currentAssistantBubble);
+    chat.scrollTop = chat.scrollHeight;
+}
+
+function appendTokenToAssistant(token) {
+    currentAssistantBuffer += token;
+    // 스트리밍 중에는 plain text로 표시 (깜빡임 방지)
+    currentAssistantBubble.textContent = currentAssistantBuffer;
+    chat.scrollTop = chat.scrollHeight;
+}
+
+function finalizeAssistantBubble() {
+    // 스트리밍 완료 시 마크다운 렌더링
+    if (currentAssistantBubble) {
+        currentAssistantBubble.innerHTML = marked.parse(currentAssistantBuffer);
+    }
+    currentAssistantBubble = null;
+}
+// ... (user bubble, interrupted 처리 등)
+```
+
+### 3-5. `server/dashboard/static/style.css` (신규)
+채팅 UI 스타일. 사용자/어시스턴트 말풍선 구분, 마크다운 렌더링 스타일, 다크 모드 기본.
+
+---
+
+## Phase 4: Edge 코드 수정
 
 > 현재 edge/ 디렉토리에는 CLAUDE.md만 있음. edge 코드 전체를 신규 생성.
 
-### 3-1. `edge/tts/supertonic_service.py` (신규 또는 server/tts에서 이관)
+### 4-1. `edge/tts/supertonic_service.py` (신규 또는 server/tts에서 이관)
 Supertonic TTS를 Edge에서 실행.
 - `synthesize(text, language) -> bytes` (PCM)
 - 디바이스 프로파일에서 inference_steps 등 설정 읽기
 
-### 3-2. `edge/tts/tts_pipeline.py` (신규)
+### 4-2. `edge/tts/tts_pipeline.py` (신규)
 텍스트 수신 → TTS 변환 → 재생 파이프라인.
 asyncio.Queue 기반으로 수신/변환/재생을 분리하여 끊김 없이 동작.
 
@@ -381,19 +797,31 @@ class TTSPipeline:
     async def stop(self): ...
 ```
 
-### 3-3. `edge/orchestrator.py` — 타임아웃 로컬 처리
+### 4-3. `edge/orchestrator.py` — 상태 머신 + 타임아웃 + pause 처리
 
-`LISTENING` 상태에서 무발화 타이머(15초) 만료 시:
+**상태 머신**:
+`IDLE` → wake word → `LISTENING` → VAD end → `PROCESSING` → response → `SPEAKING` → done → `LISTENING`
+SPEAKING 상태에서 barge-in 없음: TTS 재생 완료 시에만 LISTENING 복귀.
+
+**타임아웃 로컬 처리**: `LISTENING` 상태에서 무발화 타이머(60초) 만료 시:
 1. `config/edge.yaml`의 `timeout_messages.prompt[language]` 텍스트 읽기
 2. `TTSPipeline`에 직접 enqueue → Edge TTS 재생 (Server 호출 없음)
 3. 5초 추가 무발화 타이머 시작
 4. 5초 내 발화 감지 → `LISTENING` 복귀, 타이머 리셋
 5. 5초 경과 → `timeout_messages.end[language]` 텍스트 TTS 재생 → `EndSession` RPC 호출 → `IDLE` 전환
 
+**PAUSED 상태**: `pause_listening` 인텐트 수신 시:
+1. ack 텍스트 TTS 재생 후 PAUSED 진입
+2. 오디오 gRPC 전송 OFF, VAD OFF, 무발화 타이머 OFF
+3. 웨이크워드 감시만 유지 (IDLE과 동일한 루프 재사용)
+4. pause 타이머 시작 (Server에서 전달한 duration_s, 없으면 `config/edge.yaml`의 `pause_default_s`)
+5. 웨이크워드 감지 → chime_wake + LISTENING 진입 (세션 유지, pause 타이머 취소)
+6. pause 타이머 만료 → `timeout_messages.end` TTS → `EndSession` RPC → IDLE
+
 **주의**: 기존 `grpc_client.TimeoutPrompt()` 호출 코드는 작성하지 않는다 (proto에서 제거됨).
 언어는 마지막 STT 결과의 `language` 값을 사용하며, 없으면 기본 `"ko"`.
 
-### 3-4. `edge/main.py` (신규)
+### 4-4. `edge/main.py` (신규)
 CLI 인자:
 ```bash
 python main.py --edge --device raspberry_pi_4b
@@ -407,31 +835,37 @@ parser.add_argument("--device", type=str, default="jetson_nano",
 
 ---
 
-## Phase 4: 대화 이력 저장
+## Phase 5: 대화 이력 저장 및 Resume
 
 > `server/CLAUDE.md`의 "대화 종료 인텐트 시 Edge에 종료 텍스트 전송 후 대화 히스토리 **저장 및 초기화**" 요구사항 반영.
-> 기존 develop_plan.md Phase 6의 storage 설계를 당겨서 구현한다.
+> UX 검토(2026-04-10): 세션 Resume 기능 추가 — 종료된 대화를 DB에서 불러와 이전 맥락으로 이어감.
 
-### 4-1. `server/storage/models.py` (신규)
+### 5-1. `server/storage/models.py` (신규)
 ```python
 @dataclass
 class SessionRecord:
     id: str              # UUID
-    history_json: str    # HumanMessage/AIMessage 직렬화
-    summary: str | None  # 히스토리 요약 (있는 경우)
+    subject: str         # Gemma가 생성한 한 줄 요약 (세션 목록 표시용)
     language: str        # 주 사용 언어
     turn_count: int      # 총 대화 턴 수
+    history_json: str    # HumanMessage/AIMessage 직렬화 (DISPLAY 섹션 기준)
     created_at: datetime # 세션 시작 시각
     ended_at: datetime   # 세션 종료 시각
 ```
 
-### 4-2. `server/storage/session_repository.py` (신규)
+**주의**: `history_json`에 저장되는 내용은 Cloud LLM의 DISPLAY 섹션 응답이다
+(Phase 2-6에서 `conversation_history`에 DISPLAY만 저장하도록 설계).
+
+**subject 생성**: 세션 종료 시 Gemma 로컬 LLM이 첫 2~3턴을 한 줄 요약(15자 이내).
+실패 시 폴백: 첫 HumanMessage 텍스트를 subject로 사용.
+
+### 5-2. `server/storage/session_repository.py` (신규)
 SQLite 기반 간단한 저장소. SQLAlchemy는 과도하므로 표준 `sqlite3` 모듈 사용 (단순성 우선).
 
 ```python
 class SessionRepository:
     def __init__(self, db_path: str = "data/sessions.db"):
-        # 테이블 없으면 생성
+        # 테이블 없으면 생성 (id, subject, language, turn_count, history_json, created_at, ended_at)
         ...
 
     async def save(self, record: SessionRecord) -> None:
@@ -439,71 +873,88 @@ class SessionRepository:
         ...
 
     async def get(self, session_id: str) -> SessionRecord | None: ...
-    async def get_recent(self, limit: int = 10) -> list[SessionRecord]: ...
+    async def get_recent(self, limit: int = 5) -> list[SessionRecord]: ...
 ```
 
-### 4-3. `server/cloud/llm_client.py` 수정
+### 5-3. `server/cloud/llm_client.py` 수정
 `save_and_clear_history()` 메서드 추가:
 ```python
 async def save_and_clear_history(
     self, repository: SessionRepository, language: str
 ) -> None:
+    # Gemma로 subject 생성 (첫 2~3턴 요약)
     # 현재 conversation_history를 SessionRecord로 직렬화
     # repository.save() 호출
     # clear_history() 호출
     ...
 ```
 
-### 4-4. `server/orchestrator.py` 수정
+`restore_history()` 메서드 추가 (Resume 용):
+```python
+def restore_history(self, history_json: str) -> None:
+    # JSON → list[HumanMessage | AIMessage] 역직렬화
+    # self.conversation_history = restored
+    # self._history_summary = None (요약은 필요 시 재생성)
+    ...
+```
+
+### 5-4. `server/orchestrator.py` 수정
 `SessionRepository` 인스턴스를 `startup()`에서 생성.
 인텐트 핸들러 실행 결과에 `save_and_clear_session=True`면 위 메서드 호출.
 
-### 4-5. `config/server.yaml` 수정
-```yaml
-storage:
-  db_path: "data/sessions.db"
-```
+**세션 Resume 관련 추가**:
+- `waiting_for_selection: bool = False` 플래그.
+- `pending_sessions: list[str] = []` — 선택 가능한 session_id 목록.
+- `handle_session_selection(text: str)` 메서드: 숫자 파싱 → session 로드 → `cloud_client.restore_history()`.
+- `check_local_intent()` 앞에 `waiting_for_selection` 체크 분기 삽입.
+  - 유효 번호 → 세션 복원 + 안내 텍스트 전송, 플래그 해제.
+  - 무효/비숫자 → 플래그 해제, 일반 처리로 넘김.
 
 ---
 
-## Phase 5: 정리
+## Phase 6: 정리
 
-### 5-1. `server/tts/` 제거
+### 6-1. `server/tts/` 제거
 TTS가 Edge로 이관되었으므로 Server의 TTS 코드 삭제:
 - `server/tts/supertonic_service.py`
 - `server/tts/__init__.py`
 
-### 5-2. `server/develop_plan.md` 업데이트
-새 아키텍처 반영하여 Phase 계획 업데이트:
-- Phase 2에서 TTS 제거
-- Phase 4(기존 orchestrator/grpc)에서 모델 티어링 제거
-- Phase 6(storage)을 Phase 4로 전진
-- 로컬 인텐트 LLM 기반으로 변경 명시
+### 6-2. `server/develop_plan.md` 업데이트 (존재 시)
+새 아키텍처 반영.
+
+### 6-3. `tests/` 신규 테스트 추가
+- `tests/test_dual_stream_parser.py` — Phase 2-4 검증
+- `tests/test_prompt_templates.py` — 이중 섹션 프롬프트 유효성
+- `tests/test_dashboard_broadcast.py` — WebSocket 브로드캐스트 단위 테스트
 
 ---
 
 ## 진행 순서 (권장)
 
 ```
-Phase 1-1 → 1-2 → 1-3 → 1-4 → 1-5 → 1-6                      (기반 — 디바이스 프로파일/config/proto)
-Phase 2-1 → 2-2 → 2-3 → 2-4 → 2-5 → 2-6 → 2-7 → 2-8 → 2-9    (Server 코드)
-Phase 3-1 → 3-2 → 3-3 → 3-4                                   (Edge 코드)
-Phase 4-1 → 4-2 → 4-3 → 4-4 → 4-5                             (대화 이력 저장)
-Phase 5-1 → 5-2                                               (정리)
+Phase 1-1 → 1-2 → 1-3 → 1-4 → 1-5 → 1-6                              (기반)
+Phase 2-1 → 2-2 → 2-3 → 2-4 → 2-5 → 2-6 → 2-7 → 2-8 → 2-9 → 2-10 → 2-11   (Server 코드 + 이중 채널)
+Phase 3-1 → 3-2 → 3-3 → 3-4 → 3-5                                    (대시보드)
+Phase 4-1 → 4-2 → 4-3 → 4-4                                          (Edge 코드)
+Phase 5-1 → 5-2 → 5-3 → 5-4                                          (대화 이력 저장)
+Phase 6-1 → 6-2 → 6-3                                                (정리)
 ```
 
-각 단계 완료 후 동작 확인 후 다음 단계 진행 권장.
-- Phase 2-5 (grpc_server.py) 이후 서버 단독 실행 테스트 가능.
-- Phase 3 완료 이후 Edge-Server 통합 테스트 가능.
-- Phase 4 (대화 이력 저장)는 Phase 2-2(intent_handlers)에서 `save_and_clear_session` 플래그를 도입했으므로,
-  Phase 3보다 먼저 진행해도 무방. 단, Phase 2-2 단계에서는 저장 호출을 TODO 처리하고 Phase 4에서 실제 연결.
-- Phase 5는 모든 기능 구현 완료 후 최종 정리.
+**단계별 검증 포인트**:
+- **Phase 1 완료 후**: `config/server.yaml`에 `dashboard` 섹션이 있고 `max_tokens: 1600`으로 상향되었는지 확인.
+- **Phase 2-4 완료 후**: `DualStreamParser` 단위 테스트 통과 — 토큰 경계 케이스 포함.
+- **Phase 2-5 완료 후**: 새 이중 섹션 프롬프트로 Cloud API 호출 시 실제로 `[SPOKEN]`/`[DISPLAY]` 태그가 포함된 응답이 오는지 `test_multiturn.py`로 확인.
+- **Phase 2-8 완료 후**: Edge 없이 server만 실행하여 gRPC 클라이언트(예: grpcurl)로 ProcessVoice 호출 시 이중 섹션 분기가 동작하는지 확인.
+- **Phase 3 완료 후**: 브라우저로 `http://localhost:8080` 접속 → WebSocket 연결 → mock 데이터로 렌더링 테스트.
+- **Phase 2+3 통합 완료 후**: Edge 없이 server만 실행 → gRPC 호출 → 대시보드 GUI에서 실시간 DISPLAY 스트리밍 확인.
+- **Phase 4 완료 후**: Edge-Server 통합 테스트. 사용자 발화 → STT → SPOKEN TTS 재생 + DISPLAY 브라우저 표시 동시 동작 확인.
+- **Phase 5 완료 후**: 대화 종료 인텐트 시 SQLite DB에 레코드 저장 확인.
 
 ## 디바이스 추가 시 워크플로우 (향후 유지보수)
 
 새 디바이스(예: `jetson_agx_orin`)를 추가하려면:
 1. `shared/device_profiles.py`의 `DEVICE_PROFILES`에 프로파일 추가
-2. `main.py`의 `--device` choices에 식별자 추가 (Phase 2-6, 3-3)
+2. `main.py`의 `--device` choices에 식별자 추가 (Phase 2-9, 4-4)
 3. 필요 시 디바이스 전용 `config/<device>.yaml` 추가 (선택)
 
 위 3단계만으로 새 디바이스를 지원할 수 있어야 한다. 다른 코드 수정이 필요하다면 추상화가 부족한 것이므로 재검토한다.

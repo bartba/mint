@@ -50,9 +50,10 @@ message TextResponse {
   string text = 1;          // 응답 텍스트 (문장 단위)
   string language = 2;      // 텍스트 언어 ("ko" 또는 "en")
   string type = 3;          // 응답 타입:
-                            //   "sentence"     — LLM 응답 문장 (TTS 재생 대상)
-                            //   "end_session"  — 세션 종료 신호
-                            //   "intent"       — 로컬 인텐트 결과
+                            //   "sentence"        — LLM 응답 문장 (TTS 재생 대상)
+                            //   "end_session"     — 세션 종료 신호
+                            //   "intent"          — 로컬 인텐트 결과
+                            //   "pause_listening" — 일시정지 신호 (Edge → PAUSED 상태 전환)
   bool is_final = 4;        // true면 이 응답이 마지막 문장임을 나타냄
 }
 

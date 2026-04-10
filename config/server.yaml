@@ -44,19 +44,47 @@ local_intents:
       en: "End of conversation. Call me anytime."
     save_and_clear_session: true  # 종료 시 대화 히스토리 저장 후 초기화
 
+  - name: "pause_listening"
+    responses:
+      ko: "네, {duration}분간 대기할게요. 부르시면 다시 들을게요."
+      en: "Okay, I'll pause for {duration} minutes. Call me when you're ready."
+    default_duration_s: 300       # 기본 5분. Gemma가 duration_s를 추출하면 그 값 사용.
+    clear_session: false          # 히스토리 유지 — 복귀 시 이전 대화 이어감
+
+  - name: "list_sessions"
+    responses:
+      ko: "최근 대화 {count}개입니다. 번호를 말씀해 주세요."
+      en: "Here are your last {count} conversations. Please say a number."
+    max_list_count: 5             # 최근 세션 최대 표시 개수
+
 # ─────────────── Cloud LLM ───────────────
 # API 키는 환경변수로 설정 (YAML에 적지 않음):
 #   export ANTHROPIC_API_KEY="sk-ant-..."
 #   export OPENAI_API_KEY="sk-..."
 cloud:
-  provider: "claude"              # claude | gpt
+  provider: "claude"                 # claude | gpt
   claude_model: "claude-haiku-4-5-20251001"  # Claude 모델 (provider: claude일 때)
-  gpt_model: "gpt-5-mini"           # GPT 모델 (provider: gpt일 때)
-  max_tokens: 500                 # 최대 응답 길이 (음성이므로 짧게)
-  summarize_threshold_tokens: 4000   # 히스토리 요약 트리거 추정 토큰 수
+  gpt_model: "gpt-5-mini"            # GPT 모델 (provider: gpt일 때)
+  max_tokens: 1600                   # 최대 응답 길이
+                                     # SPOKEN(~200 토큰) + DISPLAY(~800 토큰) 동시 생성
+                                     # 기존 800 → 1600으로 상향
+  summarize_threshold_tokens: 8000   # 히스토리 요약 트리거 추정 토큰 수
                                      # 글자 수 // 2 로 추정 (tokenizer 없이)
-                                     # 4000 ≈ 30턴 (1턴 평균 ~130 토큰)
-  timeout_s: 10                   # API 타임아웃 (초)
+                                     # 8000 ≈ 40턴 (1턴 평균 ~500 토큰)
+                                     # 히스토리에는 DISPLAY 섹션 내용만 저장
+  timeout_s: 10                      # API 타임아웃 (초)
+
+# ─────────────── 대시보드 ───────────────
+# FastAPI WebSocket 서버. gRPC(50051)와 별도 포트.
+# proto 변경 없음 — HTTP/WebSocket으로 브라우저에 직접 스트리밍.
+#
+# 대화 흐름:
+#   Cloud LLM [DISPLAY] 섹션 → WebSocket 브로드캐스트 → 브라우저 실시간 타이핑 효과
+#   STT 결과(사용자 발화) → WebSocket 브로드캐스트 → 브라우저 사용자 말풍선
+dashboard:
+  enabled: true
+  host: "0.0.0.0"                   # 모든 인터페이스 (LAN 접근 허용)
+  port: 8080                        # 브라우저 접속: http://<server_ip>:8080
 
 # ─────────────── 대화 이력 저장 ───────────────
 storage:
