@@ -26,7 +26,7 @@ audio:
 
 # ─────────────── 웨이크워드 ───────────────
 wakeword:
-  model: "hey_mack"               # openWakeWord 모델명
+  model: "hey_benson"             # openWakeWord 모델명
   threshold: 0.35                 # 감지 임계값 (낮을수록 민감, 오탐 증가)
 
 # ─────────────── VAD (음성 활동 감지) ───────────────

@@ -36,10 +36,12 @@ python main.py --server --device jetson_orin_nano
   - Edge에서 받은 오디오를 STT로 텍스트 변환한다.
   - STT 결과를 임베딩 유사도 분류기(`sentence-transformers`)로 인텐트를 판별한다 (~50ms, CPU).
   - 인텐트가 감지되면 Cloud 호출 없이 즉시 결과 텍스트를 Edge로 전송한다.
-  - 인텐트 미감지 시 Cloud LLM에 전달하고, **이중 섹션 출력**으로 스트리밍 응답을 받는다:
-    - `[SPOKEN]` 섹션: 구어체 요약 (3~5문장) → 즉시 Edge로 전송하여 TTS 재생
-    - `[DISPLAY]` 섹션: 완전한 상세 응답 (마크다운 포함) → FastAPI 대시보드 GUI에 표시
-  - FastAPI 대시보드(`port 8080`)로 실시간 대화 모니터링 및 마크다운 렌더링을 제공한다.
+  - 인텐트 미감지 시 Cloud LLM에 전달하고, 스트리밍 응답을 받는다.
+  - `config/server.yaml`의 `display_enabled` 플래그로 출력 모드를 제어한다:
+    - `display_enabled: false` (기본): 단일 섹션 음성 전용 프롬프트. 토큰을 TTS에 직접 연결.
+    - `display_enabled: true`: **이중 섹션 출력** — `[SPOKEN]` 구어체 요약 → TTS, `[DISPLAY]` 상세 응답 → 대시보드.
+  - **SPOKEN은 항상 출력된다.** DISPLAY 섹션만 on/off 된다.
+  - FastAPI 대시보드(`port 8080`)로 실시간 대화 모니터링 및 마크다운 렌더링을 제공한다 (`display_enabled: true` 시 활성화).
 
 - **Cloud**: LLM 대화/응답 생성 (Claude, GPT, and more)
   - 복잡한 대화/질의에 대해 고품질 응답을 생성한다.
@@ -63,10 +65,12 @@ TTS 재생 (Supertonic)
 
 핵심 포인트:
 - Server → Edge 응답은 **텍스트**이다 (오디오가 아님). TTS는 Edge에서 수행한다.
-- Cloud LLM은 **두 섹션**을 순서대로 생성한다:
+- **`display_enabled: false`**: 단일 섹션 음성 전용 프롬프트. 토큰을 TTS에 직접 연결 (현재 동작).
+- **`display_enabled: true`**: Cloud LLM이 두 섹션을 순서대로 생성.
   - `[SPOKEN]` 먼저: 구어체 3~5문장 요약. 즉시 TTS 파이프라인으로 전달. 마크다운 금지.
   - `[DISPLAY]` 이후: 완전한 상세 응답. 마크다운/표/코드 허용. 대시보드 GUI로 전달.
-- TTS 지연은 현재와 동일 — SPOKEN이 먼저 생성되므로 첫 문장 지연 증가 없음.
+- SPOKEN은 두 모드 모두에서 항상 TTS로 전달된다. DISPLAY만 토글 대상이다.
+- TTS 지연 영향 최소 — `display_enabled: true`여도 SPOKEN이 먼저 생성되므로 첫 문장 지연 증가 ~50~100ms 이내.
 - 임베딩 인텐트 분류는 CPU에서 ~50ms. GPU(Whisper 전용) 경합 없음.
 - 대화 타임아웃: Edge가 타이머 관리 (60초 무발화 → 의사확인, 5초 추가 무발화 → 세션 종료).
 - TTS 재생 중 타임아웃 타이머 중지. IDLE 전환 시 Server 대화 히스토리 초기화.
