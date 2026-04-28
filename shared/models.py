@@ -99,7 +99,6 @@ class AudioChunkData:
 class STTResultData:
     """
     STT(음성→텍스트) 변환 결과.
-
     Whisper가 오디오를 처리한 후 이 객체에 결과를 담는다.
     Server → Edge로 참조/로깅용으로 전송되고,
     동시에 Server 내부에서 Cloud LLM 호출의 입력으로도 사용된다.
@@ -130,21 +129,38 @@ class STTResultData:
 
 
 # ─────────────────────────────────────────────
-# TTSRequestData — TTS 요청
+# TextResponseData — LLM 응답 텍스트
 # ─────────────────────────────────────────────
 
 @dataclass
-class TTSRequestData:
+class TextResponseData:
     """
-    TTS(텍스트→음성) 변환 요청.
+    Server → Edge 텍스트 응답.
 
-    Cloud LLM의 응답 텍스트를 TTS 서비스에 전달할 때 사용.
-    proto에 직접 대응하는 메시지는 없지만 (TTS는 Server 내부 처리),
-    서비스 간 데이터 전달을 위해 정의한다.
+    LLM 응답 문장, 인텐트 결과, 세션 신호 모두 이 타입으로 전달된다.
+    type 값: "sentence" | "end_session" | "pause_listening" | "intent"
     """
     text: str = ""
     language: str = "ko"
-    speed: float = 1.0
+    type: str = "sentence"
+    is_final: bool = False
+
+    def to_proto(self) -> pb2.TextResponse:
+        return pb2.TextResponse(
+            text=self.text,
+            language=self.language,
+            type=self.type,
+            is_final=self.is_final,
+        )
+
+    @classmethod
+    def from_proto(cls, proto: pb2.TextResponse) -> "TextResponseData":
+        return cls(
+            text=proto.text,
+            language=proto.language,
+            type=proto.type,
+            is_final=proto.is_final,
+        )
 
 
 # ─────────────────────────────────────────────
