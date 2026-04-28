@@ -132,7 +132,7 @@
 - **확장**: `config/intents.yaml`에 예시 문장 추가 + `server/intent_handlers.py`에 핸들러 추가.
 
 #### `pause_listening` 상세
-- 10분 고정 (`duration_s = 600`). 정규식 추출 불필요.
+- 10분 고정.
 - PAUSED 진입: 오디오 전송 OFF, wake word만 ON, 히스토리 유지.
 - 복귀 조건: 10분 만료 또는 wake word 감지 → LISTENING. 만료 시 "다시 듣고 있어요" 안내.
 

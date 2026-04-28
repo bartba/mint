@@ -2,7 +2,13 @@
 faster-whisper>=1.0
 ctranslate2>=4.0
 
+# Intent classifier - 임베딩 유사도 기반 (모델: paraphrase-multilingual-MiniLM-L12-v2)
+# 첫 실행 시 HuggingFace에서 모델 자동 다운로드 (~120MB, ~/.cache/huggingface/)
+sentence-transformers>=3.0
+numpy>=1.24
+
 # TTS - Supertonic (ONNX Runtime 기반, 한국어+영어 다국어 통합)
+# Phase 6에서 edge/로 이관 후 삭제 예정
 supertonic
 onnxruntime                   # GPU 가속 필요 시: onnxruntime-gpu
 
@@ -11,14 +17,21 @@ grpcio>=1.60
 grpcio-tools>=1.60
 protobuf>=4.25
 
-# Cloud LLM - LangChain 기반
+# Cloud LLM - LangChain 기반 (단일 프로바이더, Ollama 폴백 제거)
 langchain>=0.3
 langchain-anthropic>=0.3
 langchain-openai>=0.3
-langchain-ollama>=0.3          # 로컬 폴백 LLM (gemma3:1b)
+
+# Dashboard - FastAPI WebSocket (Phase 3)
+fastapi>=0.110
+uvicorn>=0.29
 
 # Config & Utilities
 pyyaml>=6.0
+
+# Test
+pytest>=8.0
+pytest-asyncio>=0.23
 
 # Monitoring
 prometheus-client>=0.20

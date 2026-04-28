@@ -11,7 +11,6 @@ get_config()를 통해 앱 어디서든 동일한 설정 객체에 접근할 수
     config = get_config("server", device="jetson_orin_nx")  # 디바이스 프로파일까지 병합
     print(config["stt"]["model_size"])                      # "large-v3"
     print(config["cloud"]["api_key"])                       # 환경변수 API_KEY 값
-    print(config["local_llm_model"])                        # "gemma4:e4b" (디바이스 프로파일 값)
 """
 
 import os
@@ -170,7 +169,6 @@ def get_config(role: str = "server", device: Optional[str] = None) -> dict:
         config = get_config("server")
         config = get_config("server", device="jetson_orin_nx")
         config["stt"]["model_size"]      # → "large-v3"
-        config["local_llm_model"]        # → "gemma4:e4b"  (디바이스 프로파일 값)
     """
     cache_key = (role, device)
 
@@ -187,7 +185,6 @@ def get_config(role: str = "server", device: Optional[str] = None) -> dict:
 
     # 3단계: 디바이스 프로파일 병합 (device가 지정된 경우)
     # 프로파일의 값이 YAML 설정보다 우선한다.
-    # 예: 프로파일의 local_llm_model이 server.yaml 기본값을 덮어씀
     if device is not None:
         profile = get_device_profile(device)
         merged = deep_merge(merged, profile)

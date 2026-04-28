@@ -1,12 +1,23 @@
 # CLAUDE.md — 작업 지침
 
-See @docs/prd.md for product requirements
+제품 범위·의사결정·KPI 상세는 [docs/prd.md](./docs/prd.md) 참조 (필요 시에만 로드).
+아래 "제품 핵심" 섹션은 docs/prd.md의 KPI/Scope/Out of Scope 변경 시 동기화. 그 외 PRD 갱신은 반영 불필요.
 
 ## 개발 원칙
-- 코드 작성 전 반드시 prd.md를 먼저 읽을 것
-- 구현이 PRD 요구사항에서 벗어나면 먼저 확인할 것
+- 구현이 [제품 핵심] 섹션 또는 docs/prd.md의 범위·의사결정에서 벗어나면 코드 작성 전 사용자 확인.
 
 > 프로젝트 개요·아키텍처·데이터 흐름·인텐트 목록은 [README.md](./README.md) 참조. 이 문서는 코드 작성·수정 시 따를 규약과 확장 절차만 다룬다.
+
+## 제품 핵심 (코드 작업 시 준수)
+
+- **지연 예산 (P95)**: 발화 종료→첫 TTS ≤ 2.5s / STT ≤ 600ms / 인텐트 분류 ≤ 80ms.
+- **P0 인텐트**: `end_session`, `pause_listening`(10분 고정 — 정규식 추출 없음). `list_sessions` 및 가변 duration은 P1. 디바이스 제어 인텐트도 P1.
+- **`display_enabled` 계약**: SPOKEN은 두 모드 모두 항상 TTS로 전달, DISPLAY 섹션만 토글 대상. `display_enabled: true`여도 첫 TTS 지연 증가 ≤ 100ms.
+- **LLM**: 단일 프로바이더 (런타임 전환 없음). 실패 시 안내 메시지 후 세션 종료. fallback chain은 Backlog.
+- **프라이버시**: 원본 PCM 디스크 저장 금지. Cloud로는 추론 시점 텍스트만 전송.
+- **Out of Scope (영구 제외)**: Barge-in, 모바일 앱, SaaS 호스팅.
+
+위 사항이 변경되어야 한다고 판단되면 코드 수정 전 사용자 확인 후 [docs/prd.md](./docs/prd.md)도 함께 갱신.
 
 ## 디렉터리
 

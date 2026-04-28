@@ -36,15 +36,45 @@ intent_classifier:
 intents:
   end_session:
     examples:
+      # 직접 명령 (존댓말/반말)
       - "대화 종료해줘"
-      - "그만할게"
+      - "대화 끝내줘"
       - "끝내줘"
+      - "그만할게"
       - "여기서 끝내자"
+      - "대화 그만하자"
+      - "중단해줘"
+      # 단형/구어체
       - "대화 끝"
+      - "끝"
+      - "그만"
+      - "종료"
+      # 이탈·완료 표현
+      - "이만 갈게"
+      - "이만 줄일게"
+      - "나 이제 가"
+      - "이제 됐어"
+      - "오늘은 여기까지"
+      - "오늘 대화는 여기서 마무리하자"
+      - "충분해 고마워"
+      # 작별 인사
+      - "바이"
+      - "바이바이"
+      - "잘 있어"
+      - "다음에 또 얘기하자"
+      - "나중에 또 불를게"
+      # 영어
       - "stop the conversation"
       - "end session"
       - "goodbye"
       - "quit"
+      - "I'm done"
+      - "that's all for now"
+      - "I'll stop here"
+      - "gotta go"
+      - "see you later"
+      - "bye"
+      - "let's wrap it up"
     responses:
       ko: "대화를 종료합니다. 언제든 다시 불러 주세요."
       en: "End of conversation. Call me anytime."
@@ -52,32 +82,69 @@ intents:
 
   pause_listening:
     examples:
+      # 명시적 대기 요청
       - "잠깐 멈춰"
+      - "잠시 멈춰줘"
       - "잠시 대기해줘"
-      - "5분만 기다려줘"
+      - "대기 상태로 있어줘"
+      - "조용히 있어줘"
+      # 시간 언급
+      - "10분만 기다려줘"
+      - "잠깐만 기다려"
+      - "조금만 기다려줘"
+      # 이유 설명 (자리 비움·타인 존재)
+      - "잠깐 자리 비울게"
+      - "잠깐 자리를 떠야 해"
       - "다른 사람이랑 얘기할게"
+      - "누가 와서 잠깐만"
+      - "통화해야 해서 잠깐 멈춰줘"
+      # 복귀 약속
+      - "금방 돌아올게"
+      - "이따가 다시 얘기해"
+      - "잠깐 있다가 다시 부를게"
+      # 영어
       - "pause for a while"
       - "wait a moment"
       - "give me a few minutes"
+      - "hold on for a bit"
+      - "I'll be right back"
+      - "stand by"
+      - "be quiet for a moment"
+      - "brb"
     responses:
-      ko: "네, {duration}분간 대기할게요. 부르시면 다시 들을게요."
-      en: "Okay, I'll pause for {duration} minutes. Call me when you're ready."
-    default_duration_s: 300       # 기본 5분. duration_pattern으로 추출 실패 시 사용.
-    duration_pattern: '(\d+)\s*(분|시간|초|min|hour|sec)'
+      ko: "네, 10분간 대기할게요. 부르시면 다시 들을게요."
+      en: "Okay, I'll pause for 10 minutes. Call me when you're ready."
     save_and_clear_session: false # 히스토리 유지 — 복귀 시 이전 대화 이어감
 
   list_sessions:
     examples:
+      # 목록 조회
       - "지난 대화 보여줘"
       - "이전 대화 목록"
+      - "이전 대화 목록 보여줘"
+      - "지난 대화 기록 보여줘"
+      - "대화 이력 보여줘"
       - "저장된 대화 있어?"
+      - "저장된 대화 목록"
+      # 이어가기 의도
       - "지난 대화 이어가자"
+      - "이전에 하던 대화 이어가고 싶어"
+      - "예전에 했던 대화 불러줘"
+      - "중단했던 대화 이어가자"
+      - "전에 하던 얘기 계속하고 싶어"
+      # 영어
       - "show past conversations"
       - "list previous sessions"
+      - "show conversation history"
+      - "show my saved conversations"
+      - "resume a past conversation"
+      - "load a previous chat"
+      - "what were we talking about before"
     responses:
       ko: "최근 대화 {count}개입니다. 번호를 말씀해 주세요."
       en: "Here are your last {count} conversations. Please say a number."
-    max_list_count: 5
+    max_list_count: 5              # display_enabled: true 시 최대 표시 개수
+    max_list_count_voice: 3        # display_enabled: false (음성 전용) 시 최대 표시 개수
 
 # ─────────────── Cloud LLM ───────────────
 # API 키는 환경변수로 설정 (YAML에 적지 않음):
@@ -86,7 +153,7 @@ intents:
 cloud:
   provider: "claude"                 # claude | gpt
   claude_model: "claude-haiku-4-5-20251001"  # Claude 모델 (provider: claude일 때)
-  gpt_model: "gpt-5-mini"            # GPT 모델 (provider: gpt일 때)
+  gpt_model: "gpt-5.4-mini"          # GPT 모델 (provider: gpt일 때)
   max_tokens: 1600                   # 최대 응답 길이
                                      # SPOKEN(~200 토큰) + DISPLAY(~800 토큰) 동시 생성
                                      # 기존 800 → 1600으로 상향
@@ -94,7 +161,7 @@ cloud:
                                      # 글자 수 // 2 로 추정 (tokenizer 없이)
                                      # 8000 ≈ 40턴 (1턴 평균 ~500 토큰)
                                      # 히스토리에는 DISPLAY 섹션 내용만 저장
-  timeout_s: 10                      # API 타임아웃 (초)
+  timeout_s: 15                      # API 타임아웃 (초)
 
 # ─────────────── 대시보드 ───────────────
 # FastAPI WebSocket 서버. gRPC(50051)와 별도 포트.
@@ -104,7 +171,7 @@ cloud:
 #   Cloud LLM [DISPLAY] 섹션 → WebSocket 브로드캐스트 → 브라우저 실시간 타이핑 효과
 #   STT 결과(사용자 발화) → WebSocket 브로드캐스트 → 브라우저 사용자 말풍선
 dashboard:
-  enabled: true
+  enabled: false
   host: "0.0.0.0"                   # 모든 인터페이스 (LAN 접근 허용)
   port: 8080                        # 브라우저 접속: http://<server_ip>:8080
 

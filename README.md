@@ -95,13 +95,13 @@ TTS 재생 (Supertonic)
 | 인텐트 | 동작 | Edge 수신 텍스트 |
 |--------|------|------------------|
 | 대화 세션 종료 (`end_session`) | `end_session` 신호 전송. Cloud LLM으로 대화 요약(subject) 생성 → SQLite 저장 후 히스토리 초기화. | ko: "대화를 종료합니다. 언제든 다시 불러 주세요" / en: "End of conversation. Call me anytime" |
-| 일시정지 (`pause_listening`) | `pause_listening` 신호 전송. Edge는 PAUSED 상태 진입 (오디오 전송 OFF, 웨이크워드 감시 ON). 정규식으로 `duration_s` 추출, 없으면 기본 5분. 히스토리 유지. | ko: "네, {duration}분간 대기할게요. 부르시면 다시 들을게요." / en: "Okay, I'll pause for {duration} minutes. Call me when you're ready." |
-| 지난 대화 목록 (`list_sessions`) | SQLite에서 최근 5개 세션 조회 → 번호 리스트를 Edge(음성)와 대시보드(WebSocket)에 전송. 번호 선택 시 히스토리 복원하여 이전 대화 이어감. | ko: "최근 대화 {count}개입니다. 번호를 말씀해 주세요." / en: "Here are your last {count} conversations. Please say a number." |
+| 일시정지 (`pause_listening`) | `pause_listening` 신호 전송. Edge는 PAUSED 상태 진입 (오디오 전송 OFF, 웨이크워드 감시 ON). 10분 고정. 히스토리 유지. | ko: "네, 10분간 대기할게요. 부르시면 다시 들을게요." / en: "Okay, I'll pause for 10 minutes. Call me when you're ready." |
+| 지난 대화 목록 (`list_sessions`) | SQLite에서 최근 세션 조회 → 번호 리스트를 Edge(음성)와 대시보드(WebSocket)에 전송. 번호 선택 시 히스토리 복원하여 이전 대화 이어감. 조회 개수: `display_enabled: true` → 5개, `false` → 3개. | ko: "최근 대화 {count}개입니다. 번호를 말씀해 주세요." / en: "Here are your last {count} conversations. Please say a number." |
 
 인텐트는 향후 계속 추가될 수 있다 (예: 볼륨 조절, 타이머 설정 등).
 
 ## 세션 저장 및 Resume
 
 - 세션 종료 시(`end_session` 또는 타임아웃) Cloud LLM이 대화 첫 2~3턴을 한 줄 요약(subject, 15자 이내) 생성 → `SessionRecord`로 SQLite(`data/sessions.db`)에 저장. Edge가 응답을 수신한 후 비동기 실행되므로 사용자 대기 없음. 실패 시 첫 HumanMessage 텍스트로 폴백.
-- 사용자가 "지난 대화 보여줘" → `list_sessions` 인텐트 → 최근 5개 목록을 Edge(음성)+대시보드(WebSocket)로 전송 → 번호 선택 → 해당 세션 히스토리를 Cloud LLM 클라이언트에 복원하여 이전 맥락에서 대화 계속.
+- 사용자가 "지난 대화 보여줘" → `list_sessions` 인텐트 → 최근 목록(display_enabled: true → 5개, false → 3개)을 Edge(음성)+대시보드(WebSocket)로 전송 → 번호 선택 → 해당 세션 히스토리를 Cloud LLM 클라이언트에 복원하여 이전 맥락에서 대화 계속.
 - 번호가 아닌 발화 시 선택 모드 즉시 해제 → 일반 대화 처리.

@@ -59,16 +59,16 @@ CPU 실행 (~50ms). GPU는 Whisper 전용으로 경합 없음.
 
 - 유사도 ≥ threshold(0.75): 인텐트 확정 → 핸들러 실행, Cloud LLM 스킵
 - 유사도 < threshold: 인텐트 없음 → Cloud LLM 호출
-- `pause_listening` 감지 시: `duration_pattern` 정규식으로 발화에서 `duration_s` 추출
+- `pause_listening` 감지 시: 10분 고정 일시정지 처리
 
 구현된 인텐트:
 - **대화 세션 종료** (`end_session`): Edge에 `end_session` 신호(TextResponse.type) + 종료 안내 텍스트 전송. 응답 전송 완료 후 Cloud LLM의 non-streaming 호출로 대화 첫 2~3턴을 한 줄 요약(subject) 생성 → SQLite 저장 → 히스토리 초기화. (요약 생성은 Edge 응답 이후 비동기 실행 → 사용자 대기 없음)
   - ko: "대화를 종료합니다. 언제든 다시 불러 주세요"
   - en: "End of conversation. Call me anytime"
-- **일시정지** (`pause_listening`): Edge에 `pause_listening` 신호 + ack 텍스트 전송. 정규식으로 발화에서 `duration_s` 추출, 없으면 기본 5분. 대화 히스토리 유지.
-  - ko: "네, {duration}분간 대기할게요. 부르시면 다시 들을게요."
-  - en: "Okay, I'll pause for {duration} minutes. Call me when you're ready."
-- **지난 대화 목록** (`list_sessions`): SQLite에서 최근 5개 세션 조회 → 번호 목록을 Edge(음성)와 대시보드(WebSocket)에 전송. orchestrator에 `waiting_for_selection=True` 플래그 설정.
+- **일시정지** (`pause_listening`): Edge에 `pause_listening` 신호 + ack 텍스트 전송. 10분 고정. 대화 히스토리 유지.
+  - ko: "네, 10분간 대기할게요. 부르시면 다시 들을게요."
+  - en: "Okay, I'll pause for 10 minutes. Call me when you're ready."
+- **지난 대화 목록** (`list_sessions`): SQLite에서 최근 세션 조회 → 번호 목록을 Edge(음성)와 대시보드(WebSocket)에 전송. orchestrator에 `waiting_for_selection=True` 플래그 설정. 조회 개수는 `display_enabled`에 따라 분기: `true` → `max_list_count`(5개), `false` → `max_list_count_voice`(3개).
   - 다음 발화에서 번호 파싱 → 해당 세션 히스토리 복원 → 이전 대화 맥락으로 계속.
   - 번호가 아닌 발화 → 플래그 해제 후 일반 처리.
 
